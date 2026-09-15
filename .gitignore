@@ -1,0 +1,30 @@
+# Runtime and build artifacts
+.env
+data/
+tokens.txt
+proxy.txt
+*.exe
+build/
+
+# Demo files
+demo/
+
+# Archives
+*.rar
+*.zip
+
+# Local-only dashboard prototypes (never shipped)
+internal/gateway/webui_demo/
+
+# Local-only tests (never shipped to the repo)
+*_test.go
+tests/
+
+# Local workflow and planning
+.zcode/
+.kiro/
+AGENTS.md
+PROJECT_MAP.md
+
+# Node modules
+internal/captcha/captcha_node/node_modules/
