@@ -30,15 +30,16 @@ type ProxyProfile struct {
 var proxyMu sync.Mutex
 
 // seedProfilesFromFile imports the PROXY_FILE pool into editable profiles
-// once, on the first boot with a fresh database; after that the stored
-// profiles are the single source of truth (bindings survive edits, deletes
-// are never re-seeded).
+// once, on the first boot with a fresh database; while profiles exist the
+// stored set is the single source of truth (bindings survive edits). When
+// the stored set is EMPTY (fresh DB or after Clear all) the file seeds it
+// again at boot — a refreshed proxy.txt loads with a plain restart.
 func (s *Server) seedProfilesFromFile() {
 	proxyMu.Lock()
-	defer proxyMu.Unlock()
-	raw := s.store.Setting("proxy_profiles", "")
-	if raw != "" {
-		return // already seeded / user-managed (an empty "[]" is a deliberate delete-all)
+	raw := strings.TrimSpace(s.store.Setting("proxy_profiles", ""))
+	if raw != "" && raw != "[]" && raw != "null" {
+		proxyMu.Unlock()
+		return // profiles exist — the file already seeded once
 	}
 	var list []ProxyProfile
 	pool, err := proxy.LoadProxyPool(s.cfg.ProxyFile)
@@ -57,10 +58,11 @@ func (s *Server) seedProfilesFromFile() {
 		}
 	}
 	if len(list) == 0 {
+		proxyMu.Unlock()
 		return // nothing to seed (no file yet) — stay on the empty pool
 	}
-	b, _ := json.Marshal(list)
-	s.store.SetSetting("proxy_profiles", string(b))
+	s.saveProxyProfilesLocked(list)
+	proxyMu.Unlock() // rebuildEgress re-locks — never call it under proxyMu
 	log.Printf("[proxies] seeded %d lines from %s into proxy profiles", len(list), s.cfg.ProxyFile)
 	s.rebuildEgress()
 }
@@ -104,10 +106,14 @@ func (s *Server) loadProxyProfiles() []ProxyProfile {
 	return list
 }
 
-func (s *Server) saveProxyProfiles(list []ProxyProfile) {
-	proxyMu.Lock()
+func (s *Server) saveProxyProfilesLocked(list []ProxyProfile) {
 	b, _ := json.Marshal(list)
 	s.store.SetSetting("proxy_profiles", string(b))
+}
+
+func (s *Server) saveProxyProfiles(list []ProxyProfile) {
+	proxyMu.Lock()
+	s.saveProxyProfilesLocked(list)
 	proxyMu.Unlock()
 	s.rebuildEgress()
 }

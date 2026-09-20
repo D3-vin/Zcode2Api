@@ -48,7 +48,7 @@ func (s *Server) apiStatus(w http.ResponseWriter, r *http.Request) {
 		"proxies":       proxies,
 		"active_jwt":    jwt,
 		"default_model": config.DefaultModelID, // hardwired (reference parity: refs have no such setting)
-		"version":       AppVersion,
+		"version":       config.AppVersion,
 		"models":        models,
 		"models_meta":   modelsMeta,
 	})

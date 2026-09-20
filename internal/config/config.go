@@ -8,17 +8,21 @@ import (
 	"time"
 )
 
+// AppVersion — single source for the startup banner and the dashboard.
+// Override at build: go build -ldflags "-X zcode2api/internal/config.AppVersion=1.0.1"
+var AppVersion = "1.0.1"
+
 // Deployment constants (hardwired; not env-driven). OriginBaseURL and
 // ClientVersion are vars only so tests can point them at a mock upstream.
 var (
 	AccountsDBPath = "data/accounts.db"
 	KeysFilePath   = env("ZCODE_KEYS", "tokens.txt")
 	OriginBaseURL  = "https://zcode.z.ai"
-	ClientVersion  = "3.10.2" // messages fingerprint (verified 200)
+	ClientVersion  = "3.14.0" // messages fingerprint (verified 200)
 	// BillingClientVersion — the billing family (balance/preview/claim +
 	// activation events) identifies as the current desktop, 3.11.2; the
 	// platform gates plan offers by client version (empirically proven split).
-	BillingClientVersion = "3.11.2"
+	BillingClientVersion = "3.14.0"
 	DefaultModelID       = "GLM-5.3"
 )
 

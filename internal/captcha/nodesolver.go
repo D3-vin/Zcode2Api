@@ -38,16 +38,28 @@ import (
 // NodeSolver mints verify params via the happy-dom node solver.
 type NodeSolver struct {
 	cfg config.Config
+	// mintSem serializes ALL mints (pool loop, empty-stock fallbacks,
+	// restocks, claims): the solver processes share the on-disk
+	// ~/.zcode-captcha-cdn-cache and are designed to run ONE at a time —
+	// concurrent processes race on cache writes/evictions (exit-1 storms).
+	mintSem chan struct{}
 }
 
 func NewNodeSolver(cfg config.Config) *NodeSolver {
-	return &NodeSolver{cfg: cfg}
+	return &NodeSolver{cfg: cfg, mintSem: make(chan struct{}, 1)}
 }
 
 func (n *NodeSolver) nodePath() string { return "node" }
 
 // Solve spawns the solver once per attempt (retries cover pe-stalls).
+// Concurrent callers queue here — one node process at a time.
 func (n *NodeSolver) Solve(ctx context.Context) (string, string, error) {
+	select {
+	case n.mintSem <- struct{}{}:
+		defer func() { <-n.mintSem }()
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	}
 	cc := fetchCaptchaCfg(ctx)
 	if !cc.Enabled {
 		return "", "", fmt.Errorf("%w: captcha disabled by origin config", ErrCaptchaUnavailable)

@@ -18,12 +18,6 @@ import (
 	"zcode2api/internal/upstream"
 )
 
-// AppVersion — overridable via gateway.SetAppVersion (ldflags in cmd).
-var AppVersion = "1.0.0"
-
-// SetAppVersion lets cmd inject the build-time version.
-func SetAppVersion(v string) { AppVersion = v }
-
 type Server struct {
 	cfg        config.Config
 	store      *store.Store
@@ -96,7 +90,8 @@ func NewServer(cfg config.Config) (*Server, error) {
 	s.up = &upstream.Client{
 		Cfg:               cfg,
 		Captcha:           s.captcha,
-		Sticky:            s.sticky,
+		Sticky:            s.sticky,  // chat: one sticky line
+		Pool:              s.proxies, // billing family: round-robin spread
 		ProfileForAccount: s.profileForAccountMid,
 	}
 	return s, nil

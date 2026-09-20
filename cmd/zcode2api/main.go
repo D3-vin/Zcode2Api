@@ -10,9 +10,6 @@ import (
 	"zcode2api/internal/gateway"
 )
 
-// AppVersion — overridable at build: go build -ldflags "-X main.AppVersion=1.0.1"
-var AppVersion = "1.0.0"
-
 // printBanner mirrors the GLM-ZAI-2API startup banner.
 func printBanner() {
 	cyan, yellow, magenta, green, reset := "\033[36m", "\033[33m", "\033[35m", "\033[32m", "\033[0m"
@@ -27,7 +24,7 @@ func printBanner() {
 	fmt.Println(yellow + "  📧 Telegram:" + reset + " https://t.me/D3_vin")
 	fmt.Println(magenta + "  👤 Author:" + reset + " @D3vin_dev")
 	fmt.Println(green + "  🔗 GitHub:" + reset + " https://github.com/D3-vin/Zcode2Api")
-	fmt.Println(cyan + "  📦 Version:" + reset + " " + AppVersion)
+	fmt.Println(cyan + "  📦 Version:" + reset + " " + config.AppVersion)
 	fmt.Println()
 }
 
@@ -51,7 +48,6 @@ func main() {
 	config.ScrubMitmEnv()
 	cfg := config.LoadConfig()
 	s, err := gateway.NewServer(cfg)
-	gateway.SetAppVersion(AppVersion)
 	if err != nil {
 		log.Fatal(err)
 	}

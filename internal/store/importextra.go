@@ -128,7 +128,9 @@ func (s *Store) SetLabel(id int64, label string) {
 func (s *Store) SetToken(id int64, jwt string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, _ = s.db.Exec(`UPDATE accounts SET jwt=?, status='' WHERE id=?`, jwt, id)
+	// re-saving a JWT is the operator's intentional unfreeze: status AND the
+	// risk-control cooldown clear (cooling-freeze semantics of the reference)
+	_, _ = s.db.Exec(`UPDATE accounts SET jwt=?, status='', risk_strikes=0, cooling_until=0 WHERE id=?`, jwt, id)
 }
 
 // SetDisabledModels pins the per-account model exclusion list (norms, csv).

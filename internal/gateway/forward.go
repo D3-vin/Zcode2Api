@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -35,6 +36,12 @@ func (s *Server) routeAnthropic(w http.ResponseWriter, r *http.Request, body []b
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
+	// client aliases (claude-* probes, lowercase glm-*) resolve to the real
+	// billing id ONCE, before account picking/dead-marks/body building
+	if mapped, ok := modelNameMap[strings.ToLower(model)]; ok {
+		model = mapped
+	}
+	model = s.catalog.Resolve(model)
 
 	accs, _ := s.store.Accounts()
 	maxTry := s.cfg.AccountMaxTry
@@ -55,6 +62,13 @@ func (s *Server) routeAnthropic(w http.ResponseWriter, r *http.Request, body []b
 		log.Printf("POST chat model=%s acc=%s %db", model, maskJWT(acc.JWT), len(payload))
 		resp, err := s.up.PostMessages(r.Context(), acc.JWT, acc.DeviceMid, payload, extra)
 		if err != nil {
+			// the client hung up: nothing downstream can succeed — no strike,
+			// no account switch, stop quietly (the write to a dead
+			// connection is a no-op anyway)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || r.Context().Err() != nil {
+				log.Printf("<< client gone %s", maskJWT(acc.JWT))
+				return
+			}
 			// every egress load-blocked → the account is "hot": strike it,
 			// cool after 3 strikes for 30 minutes
 			if strings.Contains(err.Error(), "load-blocked") {
@@ -178,16 +192,21 @@ func encodeBody(obj *orderedDoc) []byte {
 	return obj.MarshalPython()
 }
 
-// modelNameMap — the upstream is case-sensitive; lowercase aliases map to
-// the billing ids.
+// modelNameMap — client-side aliases to the real billing ids. Names the
+// origin never serves (Claude Code probes claude-*, clients send lowercase
+// glm-*) MUST resolve here before the catalog lookup, or the origin rejects
+// the request as an unknown model.
 var modelNameMap = map[string]string{
-	"glm-5.3":       "GLM-5.3",
-	"glm-5.3-flash": "GLM-5.3-Flash",
-	"glm-5.2":       "GLM-5.2",
-	"glm-5-turbo":   "GLM-5-Turbo",
-	"glm-turbo":     "GLM-5-Turbo",
-	"glm-5.1":       "GLM-5.1",
-	"glm-4.7":       "GLM-4.7",
+	"glm-5.3":                 "GLM-5.3",
+	"glm-5.3-flash":           "GLM-5.3-Flash",
+	"glm-5.2":                 "GLM-5.2",
+	"glm-5-turbo":             "GLM-5-Turbo",
+	"glm-turbo":               "GLM-5-Turbo",
+	"glm-5.1":                 "GLM-5.1",
+	"glm-4.7":                 "GLM-4.7",
+	"claude-opus-4-8":         "GLM-5.3",
+	"claude-sonnet-4-6":       "GLM-5.3",
+	"claude-3-5-haiku-latest": "GLM-5.3-Flash",
 }
 
 // normalizeBody — the canonical body transform:
@@ -204,14 +223,14 @@ func (s *Server) normalizeBody(body []byte, model, jwt string) []byte {
 		return body
 	}
 
-	// model: resolve alias/casing to the canonical id
+	// model: client aliases first (claude-* / lowercase glm-* — the catalog
+	// can't know them), then the catalog normalizes casing of real ids
 	if m, ok := obj.Get("model"); ok {
 		if ms, ok := m.(string); ok && ms != "" {
-			if canon := s.catalog.Resolve(ms); canon != "" {
-				obj.Set("model", canon)
-			} else if mapped, ok2 := modelNameMap[strings.ToLower(ms)]; ok2 {
-				obj.Set("model", mapped)
+			if mapped, ok2 := modelNameMap[strings.ToLower(ms)]; ok2 {
+				ms = mapped
 			}
+			obj.Set("model", s.catalog.Resolve(ms))
 		}
 	}
 

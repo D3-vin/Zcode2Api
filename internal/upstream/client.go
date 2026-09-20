@@ -5,6 +5,7 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -33,24 +34,27 @@ const (
 type Client struct {
 	Cfg     config.Config
 	Captcha captcha.Solver
-	Sticky  *proxy.StickyProxy
+	Sticky  *proxy.StickyProxy // chat egress: one line holds traffic until it fails
+	Pool    *proxy.ProxyPool   // billing-family egress: round-robin spread
 	// ProfileForAccount returns a per-account bound proxy URL (dashboard
-	// proxy profiles); nil = fall through to the sticky pool.
+	// proxy profiles); nil = fall through to the pool.
 	ProfileForAccount func(accDeviceMid string) *url.URL
 
 	egMu   sync.Mutex
 	egress map[string]*http.Client // billing-family clients, per egress URL
 }
 
-// egressURL picks the account's egress: the bound dashboard profile if
-// any, else the sticky pool's current proxy, else nil = direct.
+// egressURL picks the billing-family egress: the bound dashboard profile
+// if any, else the NEXT pool line (round-robin). A 46-account scan must
+// spread across the pool — one sticky line hits the provider's per-line
+// connection cap ("Not Enough Connections"). Empty pool = nil = direct.
 func (c *Client) egressURL(mid string) *url.URL {
 	u := (*url.URL)(nil)
 	if c.ProfileForAccount != nil {
 		u = c.ProfileForAccount(mid)
 	}
-	if u == nil {
-		u = c.Sticky.Next()
+	if u == nil && c.Pool != nil {
+		u = c.Pool.Next()
 	}
 	return u
 }
@@ -267,6 +271,12 @@ func reattach(head []byte, rest io.ReadCloser) io.ReadCloser {
 	}{io.MultiReader(strings.NewReader(string(head)), rest), rest}
 }
 
+// ctxGone reports a canceled/expired request context: the client hung up,
+// nothing downstream can succeed — never rotate, never strike.
+func ctxGone(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
 // PostMessages sends one chat request: up to LOAD_SWAPS+1 egress attempts
 // (sticky proxy, rotating on load verdicts and dead proxies), a fresh
 // single-use captcha param per attempt (minted direct from this host).
@@ -276,6 +286,9 @@ func (c *Client) PostMessages(ctx context.Context, jwt, deviceMid string, body [
 	busy := 0      // 3010 admission-limit busy-retries (same egress)
 	raRetries := 0 // plain-429 Retry-After in-place retries
 	for swap := 0; swap <= loadSwaps; swap++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 	retry:
 		var proxyURL *url.URL
 		if c.ProfileForAccount != nil && swap == 0 {
@@ -307,9 +320,13 @@ func (c *Client) PostMessages(ctx context.Context, jwt, deviceMid string, body [
 		if !c.Cfg.CaptchaOff && c.Captcha != nil {
 			p, region, err := c.Captcha.Solve(ctx)
 			if err != nil {
+				if ctxGone(err) || ctx.Err() != nil {
+					return nil, ctx.Err() // client hung up — no rotation, no strike
+				}
 				// solver failure is its own retry domain (pe-stalls etc.) —
-				// rotate the egress and let the next swap try again
-				log.Printf("[egress] mint failed via %s — rotating (%d/%d): %v", egress, swap+1, loadSwaps, err)
+				// rotate the egress and let the next swap try again (the
+				// mint itself is always direct; the egress is chat-only)
+				log.Printf("[egress] mint failed (chat egress %s) — rotating (%d/%d): %v", egress, swap+1, loadSwaps, err)
 				continue
 			}
 			verify = p
@@ -324,6 +341,9 @@ func (c *Client) PostMessages(ctx context.Context, jwt, deviceMid string, body [
 		log.Printf("[egress] chat via %s (mint direct, swap %d)", egress, swap)
 		resp, err := sendChat(ctx, proxyURL, target, headers, body, 15*time.Second)
 		if err != nil {
+			if ctxGone(err) || ctx.Err() != nil {
+				return nil, ctx.Err() // client hung up — no rotation, no strike
+			}
 			// connect-level failure (dead proxy, refused CONNECT): rotate
 			log.Printf("[egress] connect failed via %s — rotating (%d/%d)", egress, swap+1, loadSwaps)
 			continue
