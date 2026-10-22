@@ -1,6 +1,6 @@
 # ⚡ Zcode2API
 
-OpenAI & Anthropic-compatible proxy for Z.AI (ZCode Start Plan) with JWT account pool, automatic failover, captcha solving, and smart proxy rotation.
+OpenAI & Anthropic-compatible proxy for Z.AI (ZCode Start Plan) with JWT account pool, automatic failover, captcha handling, and smart proxy rotation.
 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/D3-vin/Zcode2Api/releases)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev/)
@@ -18,15 +18,15 @@ OpenAI & Anthropic-compatible proxy for Z.AI (ZCode Start Plan) with JWT account
 
 ## Features
 
-- 🚀 **Single Binary** — server, captcha solver, and token pool in one executable
+- 🚀 **Single Binary** — server, captcha handler, and token pool in one executable
 - 🔓 **Dual Protocol** — Anthropic Messages (`/v1/messages`) + OpenAI Chat (`/v1/chat/completions`)
 - 🧩 **Account Pool** — JWT rotation with automatic failover on quota exhaustion
 - 🛡️ **Smart Failover** — handles 429, load errors (3012/3007/3009/3010/529) with proxy rotation
 - 📊 **Live Dashboard** — account quotas, proxy profiles, real-time monitoring
 - 🌐 **Proxy Support** — sticky/rotate modes, auto-pause on failures, IP probing
-- 🔐 **Captcha Auto-Solve** — embedded Node.js solver for Aliyun captchas
+- 🔐 **Captcha handling** — embedded Node.js module for Aliyun captchas
 - 🎯 **Dynamic Models** — catalog synced from account billing (currently **GLM-5.3** & **GLM-5.3-Flash**)
-- 📦 **Zero Dependencies** — Node.js solver embedded, SQLite database, no external services
+- 📦 **Zero Dependencies** — Node.js module embedded, SQLite database, no external services
 
 > 💡 **Works with Cursor, OpenCode, Claude Code, and any OpenAI/Anthropic-compatible client out of the box!**
 
@@ -51,7 +51,7 @@ go build -trimpath -ldflags="-s -w" -o zcode2api ./cmd/zcode2api
 ```
 
 **Requirements:**
-- **Node.js on PATH** (for captcha solver)
+- **Node.js on PATH** (for captcha handling)
 - Go 1.25+ (if building from source)
 
 ### 2. Configure
@@ -185,7 +185,7 @@ All settings in `.env` (see `.env.example` for full reference):
 | `LOAD_SWAPS` | `4` | Egress rotations on load errors (3012/3007/3009/3010) |
 | `ACCOUNT_MAX_TRY` | `8` | Max account attempts per client request (failover) |
 | `BILLING_WORKERS` | `25` | Concurrent workers for quota refresh |
-| `CAPTCHA_SOLVE_TIMEOUT` | `40s` | Captcha solver timeout |
+| `CAPTCHA_SOLVE_TIMEOUT` | `40s` | Captcha handling timeout |
 | `CAPTCHA_RETRIES` | `3` | Captcha retry attempts |
 | `CAPTCHA_MODE` | _(empty)_ | Set to `off` to disable background captcha mint |
 
@@ -263,11 +263,11 @@ Zcode2Api/
 ├── tokens.txt                   # JWT seed file (optional)
 ├── data/                        # Runtime data directory
 │   ├── zcode2api.db            # SQLite database (accounts, proxies, settings)
-│   └── captcha_node/           # Embedded captcha solver (auto-extracted)
+│   └── captcha_node/           # Embedded captcha module (auto-extracted)
 ├── cmd/zcode2api/               # Main application
 ├── internal/
 │   ├── gateway/                 # Core server logic
-│   ├── captcha/                 # Captcha solver integration
+│   ├── captcha/                 # Captcha handling integration
 │   ├── store/                   # Database layer
 │   ├── upstream/                # Z.AI client
 │   ├── proxy/                   # Proxy management
@@ -312,6 +312,10 @@ go build -ldflags "-X main.AppVersion=1.0.1" -o zcode2api ./cmd/zcode2api
 
 ## License
 
-Provided AS-IS without warranty. Use at your own risk.
+Provided as-is for educational and interoperability purposes — see [LICENSE](LICENSE).
 
-**⚠️ Disclaimer**: This tool is for educational purposes. Ensure compliance with Z.AI Terms of Service.
+## ⚠️ Disclaimer
+
+This software is provided **for educational and interoperability purposes only**, "AS IS", without warranty of any kind. The author is not responsible for any misuse or consequences — responsibility lies entirely on the end user. Use in accordance with Z.AI's Terms of Service. Not affiliated with Z.AI or Alibaba Cloud.
+
+> ПО предоставляется исключительно в образовательных и ознакомительных целях, «как есть». Автор не несёт ответственности за использование.
