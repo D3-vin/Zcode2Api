@@ -24,6 +24,9 @@ func (s *Server) startSchedulers() {
 			go s.quotaMonitorLoop()
 		})
 	}
+	s.precheckOnce.Do(func() {
+		go s.chatPrecheckLoop()
+	})
 }
 
 func (s *Server) dailyWarmLoop() {
@@ -49,7 +52,10 @@ func (s *Server) warmDueAccounts() {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-		rep := s.up.WarmAccount(ctx, a.JWT, a.DeviceMid)
+		s.mu.Lock()
+		claim := s.autoClaim
+		s.mu.Unlock()
+		rep := s.up.WarmAccountOpts(ctx, a.JWT, a.DeviceMid, claim)
 		cancel()
 		s.store.SetSetting("warm_last_"+strconv.FormatInt(a.ID, 10), today)
 		log.Printf("[warm-daily] %s %s", maskJWT(a.JWT), rep.Plans)

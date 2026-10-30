@@ -16,6 +16,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/accounts", s.withAuth(s.apiAccounts))
 	mux.HandleFunc("/api/accounts/add", s.withAuth(s.apiAccountsAdd))
 	mux.HandleFunc("/api/accounts/remove", s.withAuth(s.apiAccountsRemove))
+	mux.HandleFunc("/api/accounts/delete-expired", s.withAuth(s.apiAccountsDeleteExpired))
 	mux.HandleFunc("/api/accounts/select", s.withAuth(s.apiAccountsSelect))
 	mux.HandleFunc("/api/accounts/import", s.withAuth(s.apiAccountsImport))
 	mux.HandleFunc("/api/quota/refresh", s.withAuth(s.apiQuotaRefresh))
@@ -32,7 +33,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/proxies", s.withAuth(s.apiProxyList))
 	mux.HandleFunc("/api/proxies/save", s.withAuth(s.apiProxySave))
 	mux.HandleFunc("/api/proxies/delete", s.withAuth(s.apiProxyDelete))
+	mux.HandleFunc("/api/proxies/clear", s.withAuth(s.apiProxyClear))
+	mux.HandleFunc("/api/proxies/import", s.withAuth(s.apiProxyImport))
 	mux.HandleFunc("/api/proxies/probe", s.withAuth(s.apiProxyProbe))
+	mux.HandleFunc("/api/debug/ping", s.withAuth(s.apiDebugPing))
 	mux.HandleFunc("/api/accounts/restore", s.withAuth(s.apiAccountsImportJSON))
 	mux.HandleFunc("/v1/models", s.withGatewayAuth(s.handleModels))
 	mux.HandleFunc("/v1/usage", s.withGatewayAuth(s.handleUsage))
@@ -61,6 +65,13 @@ func (s *Server) ListenAndServe() error {
 	log.Printf("  POST /v1/chat/completions  (OpenAI)")
 	log.Printf("  POST /v1/messages          (Anthropic)")
 	log.Printf("  GET  /v1/models")
+	if s.cfg.ChatDump != "" {
+		on := "off"
+		if s.chatDump {
+			on = "on"
+		}
+		log.Printf("  CHAT_DUMP %s (%s)", s.cfg.ChatDump, on)
+	}
 	log.Printf("[pool] %d accounts (quota refresh is the dashboard button)", s.store.Count())
 	go s.afterListen()
 	return http.ListenAndServe(addr, s.Handler())
@@ -72,10 +83,12 @@ func (s *Server) afterListen() {
 	if n := s.store.MarkEmptyFreeExpired(); n > 0 {
 		log.Printf("[pool] marked %d stored empty Free as expired (hidden, kept)", n)
 	}
-	// pull the actual model list + quotas + model metadata from the origin in
-	// the background so /v1/models reflects the server, not the fallback
+	// rebuild the model catalog from the STORED quota snapshots — the boot
+	// path needs no origin scan (with hundreds of accounts a full billing
+	// sweep at every start was pure noise; the quota monitor and the
+	// Refresh button keep the live data fresh)
 	go func() {
-		s.refreshAllBilling()
+		s.rebuildCatalogFromStore()
 		s.enrichCatalogFromConfigs()
 	}()
 }

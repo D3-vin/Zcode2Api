@@ -3,6 +3,7 @@ package upstream
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,13 @@ func Norm(s string) string {
 	return b.String()
 }
 
+// originCodePrefixRe recovers the code from a TRUNCATED head: origin
+// bodies put "code" first, so the prefix regex still finds it when the
+// 256-byte peek cut the JSON mid-document (live 2026-10-10: a 410-byte
+// 3012 body peeked at 256 → strict parse failed → verdict missed → the
+// 405 got RELAYED to the client).
+var originCodePrefixRe = regexp.MustCompile(`"code"\s*:\s*"?([0-9]+)`)
+
 func originJSONCode(body []byte) int {
 	raw := bytesTrimLeft(body)
 	if len(raw) == 0 || raw[0] != '{' {
@@ -31,6 +39,10 @@ func originJSONCode(body []byte) int {
 		Code any `json:"code"`
 	}
 	if json.Unmarshal(raw, &data) != nil {
+		if m := originCodePrefixRe.FindSubmatch(raw); m != nil {
+			n, _ := strconv.Atoi(string(m[1]))
+			return n
+		}
 		return 0
 	}
 	switch v := data.Code.(type) {

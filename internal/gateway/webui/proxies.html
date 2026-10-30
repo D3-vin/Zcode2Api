@@ -147,16 +147,16 @@ async function delProxy(id) { await post('/api/proxies/delete', { id }); await r
 async function clearAll() {
   if (!PROXIES.length) return;
   if (!confirm('Delete all ' + PROXIES.length + ' proxy lines?')) return;
-  for (const p of PROXIES) await post('/api/proxies/delete', { id: p.id });
+  await post('/api/proxies/clear', {});
   SHOW_ALL = false;
   toast('All lines deleted', 'ok');
   await refreshProxies();
 }
 async function doImportLines() {
   const lines = document.getElementById('imp-text').value.split('\n').map(x => x.trim()).filter(Boolean);
-  let added = 0;
-  for (const l of lines) { const d = await post('/api/proxies/save', { url: l, name: '', mode: 'sticky' }); if (d.ok) added++; }
-  toast('Imported ' + added + ' line(s)', 'ok'); closeModal('modal-import'); refreshProxies();
+  if (!lines.length) { closeModal('modal-import'); return; }
+  const d = await post('/api/proxies/import', { lines });
+  toast('Imported ' + (d.added || 0) + ' line(s)', 'ok'); closeModal('modal-import'); refreshProxies();
 }
 async function refreshProxies() {
   const d = await j('/api/proxies'); PROXIES = d.profiles || [];

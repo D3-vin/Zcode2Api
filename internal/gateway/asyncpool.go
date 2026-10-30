@@ -74,7 +74,10 @@ func (s *Server) runAsync(ctx context.Context, w http.ResponseWriter, fl http.Fl
 		if err != nil || acc == nil {
 			return "no available account"
 		}
-		payload := s.normalizeBody(body, model, acc.JWT)
+		payload := s.normalizeBody(body, model, acc.JWT, acc.DeviceMid)
+		if attempt == 0 {
+			dumpChatBodies(s.chatDumpPath(), nil, body, payload, maskJWT(acc.JWT))
+		}
 		resp, err := s.up.PostMessages(ctx, acc.JWT, acc.DeviceMid, payload, nil)
 		if err != nil {
 			// network-level failure → switch account with 2^n backoff
@@ -86,11 +89,19 @@ func (s *Server) runAsync(ctx context.Context, w http.ResponseWriter, fl http.Fl
 			}
 			continue
 		}
+		if resp == nil {
+			// same (nil,nil) armor as routeAnthropic — PostMessages must
+			// never do this, but a live panic proved it can
+			skip[acc.ID] = true
+			continue
+		}
 		if resp.StatusCode != 200 {
 			head, _, _ := upstream.PeekBody(resp, 256)
-			if upstream.IsQuotaFamily429(resp.StatusCode, head) || upstream.IsQuotaError(head) {
+			if resp.StatusCode == http.StatusTooManyRequests || upstream.IsQuotaFamily429(resp.StatusCode, head) || upstream.IsQuotaError(head) {
 				resp.Body.Close()
-				s.markQuotaDead(acc, model)
+				if upstream.IsQuotaFamily429(resp.StatusCode, head) || upstream.IsQuotaError(head) {
+					s.markQuotaDead(acc, model)
+				}
 				skip[acc.ID] = true
 				continue
 			}
@@ -100,6 +111,7 @@ func (s *Server) runAsync(ctx context.Context, w http.ResponseWriter, fl http.Fl
 		}
 		// stream chunks: raw SSE payloads from the origin
 		_ = s.store.Select(acc.ID)
+		s.quota1005Reset(acc.ID, model)
 		br := bufio.NewReader(resp.Body)
 		sent := 0
 		for {

@@ -105,6 +105,14 @@ func (s *Store) RiskReset(id int64) {
 	_, _ = s.db.Exec(`UPDATE accounts SET risk_strikes=0, cooling_until=0 WHERE id=?`, id)
 }
 
+// SetCooling pins an account's cooldown directly (chat precheck bench).
+// Restore is RiskReset (clears strikes + cooling together).
+func (s *Store) SetCooling(id int64, until int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, _ = s.db.Exec(`UPDATE accounts SET cooling_until=? WHERE id=?`, until, id)
+}
+
 // Rotate advances the named rotation cursor over n items and returns the
 // new position (0..n-1). With n<=1 it stays 0.
 func (s *Store) Rotate(key string, n int) int {

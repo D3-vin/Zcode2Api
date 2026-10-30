@@ -87,7 +87,11 @@ const HTML = `<!DOCTYPE html><html><head></head><body>
 </body></html>`;
 
 // ── CDN dual cache ──────────────────────────────────────────────────────────
-const CDN_CACHE_DIR = path.join(os.homedir(), ".zcode-captcha-cdn-cache");
+// CAPTCHA_CDN_CACHE overrides the cache root (the Go host points parallel
+// workers at isolated subdirectories — concurrent processes on one dir race).
+const CDN_CACHE_DIR = process.env.CAPTCHA_CDN_CACHE
+  ? path.resolve(process.env.CAPTCHA_CDN_CACHE)
+  : path.join(os.homedir(), ".zcode-captcha-cdn-cache");
 const _memCdnCache = new Map();
 // Within one process a single solve runs once, but stall accounting stays at module level by URL:
 // when subprocesses are spun up serially, the previous process's stall state is enforced by disk eviction.

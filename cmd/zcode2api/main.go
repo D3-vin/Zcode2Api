@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -31,11 +32,11 @@ func printBanner() {
 func main() {
 	printBanner()
 	config.LoadDotEnv()
-	// LOG_FILE: empty (default) = console only; a path = all log output
-	// goes to that file (append) instead of the console
+	// LOG_FILE: empty (default) = console only; a path = logs ALSO go to
+	// that file (truncated each start) — the console keeps printing in parallel
 	if lf := strings.TrimSpace(os.Getenv("LOG_FILE")); lf != "" {
-		if f, err := os.OpenFile(lf, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
-			log.SetOutput(f)
+		if f, err := os.OpenFile(lf, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+			log.SetOutput(io.MultiWriter(f, os.Stderr))
 			fmt.Println("  logging to " + lf)
 		} else {
 			fmt.Println("  LOG_FILE unavailable, console logging: " + err.Error())

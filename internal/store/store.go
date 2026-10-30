@@ -1,8 +1,10 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -30,6 +32,7 @@ type Account struct {
 	ExpiresAt      string
 	Active         bool
 	Status         string // "", "expired", "revoked" — marked accounts are hidden, never auto-deleted
+	CreatedAt      int64  // 0 = pre-created_at row (treated as old); set by Add
 }
 
 type Store struct {
@@ -107,6 +110,7 @@ CREATE TABLE IF NOT EXISTS settings (
 		`ALTER TABLE accounts ADD COLUMN risk_strikes INTEGER DEFAULT 0`,
 		`ALTER TABLE accounts ADD COLUMN cooling_until INTEGER DEFAULT 0`,
 		`ALTER TABLE accounts ADD COLUMN disabled_models TEXT DEFAULT ''`,
+		`ALTER TABLE accounts ADD COLUMN created_at INTEGER DEFAULT 0`,
 	} {
 		if _, err = s.db.Exec(col); err != nil {
 			if !strings.Contains(err.Error(), "duplicate column") {
@@ -119,12 +123,12 @@ CREATE TABLE IF NOT EXISTS settings (
 
 func (s *Store) Close() error { return s.db.Close() }
 
-const accountCols = `id, jwt, label, device_mid, quota_json, plan_name, expires_at, active, status, api_key, risk_strikes, cooling_until, disabled_models`
+const accountCols = `id, jwt, label, device_mid, quota_json, plan_name, expires_at, active, status, api_key, risk_strikes, cooling_until, disabled_models, created_at`
 
 func scanAccount(sc interface{ Scan(...any) error }) (Account, error) {
 	var a Account
 	var active int
-	err := sc.Scan(&a.ID, &a.JWT, &a.Label, &a.DeviceMid, &a.QuotaJSON, &a.PlanName, &a.ExpiresAt, &active, &a.Status, &a.APIKey, &a.RiskStrikes, &a.CoolingUntil, &a.DisabledModels)
+	err := sc.Scan(&a.ID, &a.JWT, &a.Label, &a.DeviceMid, &a.QuotaJSON, &a.PlanName, &a.ExpiresAt, &active, &a.Status, &a.APIKey, &a.RiskStrikes, &a.CoolingUntil, &a.DisabledModels, &a.CreatedAt)
 	a.Active = active != 0
 	return a, err
 }
@@ -176,7 +180,9 @@ func (s *Store) Add(jwt, label string) (Account, error) {
 	// fingerprint pattern: a fresh uuid4 per account — one "fresh
 	// install on this machine" per account, not a derived/synthetic scheme
 	mid := util.GenerateUUID()
-	res, err := s.db.Exec(`INSERT INTO accounts (jwt, label, device_mid) VALUES (?, ?, ?)`, jwt, label, mid)
+	created := time.Now().Unix()
+	res, err := s.db.Exec(`INSERT INTO accounts (jwt, label, device_mid, created_at) VALUES (?, ?, ?, ?)`,
+		jwt, label, mid, created)
 	if err != nil {
 		return Account{}, err
 	}
@@ -186,7 +192,7 @@ func (s *Store) Add(jwt, label string) (Account, error) {
 	if n == 1 {
 		_, _ = s.db.Exec(`UPDATE accounts SET active=1 WHERE id=?`, id)
 	}
-	return Account{ID: id, JWT: jwt, Label: label, DeviceMid: mid, Active: n == 1}, nil
+	return Account{ID: id, JWT: jwt, Label: label, DeviceMid: mid, Active: n == 1, CreatedAt: created}, nil
 }
 
 func (s *Store) Remove(id int64) error {
@@ -202,6 +208,22 @@ func (s *Store) Remove(id int64) error {
 		_, _ = s.db.Exec(`UPDATE accounts SET active=1 WHERE id=(SELECT MIN(id) FROM accounts)`)
 	}
 	return nil
+}
+
+func (s *Store) DeleteExpired() (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var wasActive int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM accounts WHERE status='expired' AND active=1`).Scan(&wasActive)
+	res, err := s.db.Exec(`DELETE FROM accounts WHERE status='expired'`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	if wasActive > 0 {
+		_, _ = s.db.Exec(`UPDATE accounts SET active=1 WHERE id=(SELECT MIN(id) FROM accounts)`)
+	}
+	return n, nil
 }
 
 // MarkEmptyFreeExpired: stored Free with no entitlements are marked expired
@@ -223,7 +245,7 @@ UPDATE accounts SET status='expired', active=0
 }
 
 // MarkStatus flags accounts (expired/revoked) and deactivates them; the rows
-// stay in the database — only the dashboard remove button deletes.
+// stay in the database — dashboard remove / delete-expired deletes.
 func (s *Store) MarkStatus(ids []int64, status string) int {
 	if len(ids) == 0 {
 		return 0
@@ -294,6 +316,7 @@ type Quota struct {
 	ExpiresAt    string           `json:"expiresAt"`
 	Balances     []map[string]any `json:"balances"`
 	Entitlements []map[string]any `json:"entitlements"`
+	PlanIDs      []string         `json:"plan_ids,omitempty"`
 }
 
 func (s *Store) MarkDead(accountID int64, modelNorm string, until int64) {
@@ -345,6 +368,26 @@ func (s *Store) Setting(k, def string) string {
 	return v
 }
 
+// SettingsWithPrefix returns every setting whose key starts with prefix
+// (e.g. the persisted account line bindings "line:").
+func (s *Store) SettingsWithPrefix(prefix string) map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]string{}
+	rows, err := s.db.Query(`SELECT k, v FROM settings WHERE k LIKE ?`, prefix+"%")
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k, v string
+		if rows.Scan(&k, &v) == nil {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 func (s *Store) SetSetting(k, v string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -361,6 +404,16 @@ func DeviceMidFor(jwt string) string {
 		name = sub
 	}
 	return uuid.NewSHA1(uuid.NameSpaceDNS, []byte("zcode-gw."+name)).String()
+}
+
+// SessionIDFor is the Mac client's x-session-id / metadata.session_id:
+// "session_" + 32 hex, stable per device mid (23mac.har reused it across turns).
+func SessionIDFor(deviceMid string) string {
+	if deviceMid == "" {
+		deviceMid = "anon"
+	}
+	sum := sha256.Sum256([]byte("zcode-session." + deviceMid))
+	return "session_" + hex.EncodeToString(sum[:16])
 }
 
 // JWTSub extracts the subject (sub, then user_id) from a JWT without

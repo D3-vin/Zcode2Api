@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Zcode2Api · Account Pool</title>
-<link rel="stylesheet" href="/app.css?v=1.0.6">
+<link rel="stylesheet" href="/app.css?v=1.1.0">
 </head>
 <body>
 
@@ -36,8 +36,19 @@
       <button class="page-action-btn" onclick="doExport()"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Export</button>
       <button class="page-action-btn" title="Claim all: preview billing and claim every plan the origin offers, per account" onclick="claimAll(this)"><svg viewBox="0 0 24 24"><polyline points="20 12 20 22 4 22 4 12"/><rect x="2" y="7" width="20" height="5"/><line x1="12" y1="22" x2="12" y2="7"/><path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg>Claim all</button>
       <button class="page-action-btn" onclick="refreshAll(this)"><svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>Refresh quotas</button>
+      <button class="page-action-btn page-action-btn-danger" id="btn-del-expired" style="display:none" onclick="deleteExpired(this)"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Delete expired</button>
       <button class="page-action-btn page-action-btn-primary" onclick="openModal('modal-add')"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add</button>
     </div>
+  </div>
+
+  <div class="job-bar" id="job-bar">
+    <div class="job-bar-row">
+      <span class="job-kind" id="job-kind">Job</span>
+      <span class="job-label" id="job-label">starting…</span>
+      <span class="job-count" id="job-count">0 / 0</span>
+      <span class="job-pct" id="job-pct">0%</span>
+    </div>
+    <div class="job-track"><div class="job-fill" id="job-fill"></div></div>
   </div>
 
   <div class="section-head"><div class="section-title">Account overview</div></div>
@@ -119,10 +130,14 @@
 <input type="file" id="import-file" accept=".json" style="display:none" onchange="onImportFile(this)">
 <div class="toast-container" id="toasts"></div>
 
-<script src="/app.js?v=1.0.6"></script>
+<script src="/app.js?v=1.1.0"></script>
 <script>
 const PAGE = 'accounts';
 let ACCOUNTS = [], PROFILES = [], EDIT_ID = 0, curFilter = 'all';
+const ACCT_PAGE = 50;
+let acctLimit = ACCT_PAGE;
+let acctSortDir = 1; // 1 = old→new (id asc), -1 = new→old
+function toggleAcctSort() { acctSortDir *= -1; renderRows(); }
 
 function statusOf(a) {
   if (a.status) return a.status; // revoked / expired / disabled
@@ -159,17 +174,29 @@ function renderFilters() {
 
 function setFilter(f, btn) {
   curFilter = f;
+  acctLimit = ACCT_PAGE;
   document.querySelectorAll('#acct-filters .filter-chip').forEach(c => c.classList.remove('active'));
   btn.classList.add('active');
+  syncExpiredBtn();
   renderRows();
+}
+function showMoreAccts() { acctLimit += ACCT_PAGE; renderRows(); }
+function syncExpiredBtn() {
+  const btn = document.getElementById('btn-del-expired');
+  if (!btn) return;
+  const n = ACCOUNTS.filter(a => displayStatus(a) === 'expired').length;
+  btn.style.display = (curFilter === 'expired' && n > 0) ? 'inline-flex' : 'none';
 }
 
 function renderRows() {
   const el = document.getElementById('acct-list');
-  const list = ACCOUNTS.filter(a => curFilter === 'all' || displayStatus(a) === curFilter);
+  const list = ACCOUNTS.filter(a => curFilter === 'all' || displayStatus(a) === curFilter)
+    .sort((a, b) => (a.id - b.id) * acctSortDir);
   if (!list.length) { el.innerHTML = '<div class="empty-state">No accounts in this view</div>'; return; }
-  el.innerHTML = '<div class="acct-head"><span>Credential / account</span><span>Status</span><span title="3 strikes (final 3012) → 30m cooldown; a clean 200 resets">Strikes</span><span>Quota</span><span class="th-actions">Actions</span></div>' +
-    list.map(a => {
+  const shown = list.slice(0, acctLimit);
+  const more = list.length - shown.length;
+  el.innerHTML = `<div class="acct-head"><span class="th-sort" title="Oldest first / newest first" onclick="toggleAcctSort()">Credential / account<svg class="sort-chevron${acctSortDir < 0 ? ' desc' : ''}" viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></svg></span><span>Status</span><span title="3 strikes (final 3012) → 30m cooldown; a clean 200 resets">Strikes</span><span>Quota</span><span class="th-actions">Actions</span></div>` +
+    shown.map(a => {
       const st = displayStatus(a);
       const ent = (a.entitlements || []);
       const quota = ent.length ? '<div class="quota-rows">' + ent.map(e => {
@@ -179,7 +206,7 @@ function renderRows() {
           <div class="quota-row-track"><div class="quota-row-fill ${cls}" style="width:${pct}%"></div></div>
           <div class="quota-row-val"><span><b>${fmtNum(e.remaining)}</b> / ${fmtNum(e.limit)}</span>${e.period_end ? '<span class="quota-row-exp">until ' + fmtDateQ(e.period_end) + '</span>' : ''}</div></div>`;
       }).join('') + '</div>' : '<div class="quota-empty">No plan data</div>';
-      return `<div class="acct-row ${a.status ? 'is-disabled' : ''}" data-status="${st}">
+      return `<div class="acct-row ${a.status ? 'is-disabled' : ''} ${a.active ? 'is-current' : ''}" data-status="${st}">
         <div class="cell cred">
           <div style="min-width:0"><div class="acct-name"><span class="nm">${a.label || 'account #' + a.id}</span><span class="tier-b tier-plan">${a.plan || 'no plan'}</span></div>
           <div class="cred-sub">${a.jwt} · JWT</div></div></div>
@@ -187,6 +214,7 @@ function renderRows() {
         <div class="cell"><span class="cell-sub" style="font-family:var(--mono)">${a.risk_strikes || 0} / 3</span></div>
         <div class="cell">${quota}</div>
         <div class="cell acct-actions">
+          <button class="act-btn icon${a.active ? ' on' : ''}" ${a.active || a.status ? 'disabled' : ''} title="${a.active ? 'Active for chat' : 'Make active for chat'}" onclick="selectAccount(${a.id})"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/></svg></button>
           <button class="act-btn icon" title="Refresh quota" onclick="spinBtn(this);refreshOne(${a.id})"><svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
           <button class="act-btn icon" title="Claim every offered plan" onclick="spinBtn(this);claimOne(${a.id})"><svg viewBox="0 0 24 24"><polyline points="20 12 20 22 4 22 4 12"/><rect x="2" y="7" width="20" height="5"/><line x1="12" y1="22" x2="12" y2="7"/><path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg></button>
           <button class="act-btn icon" title="Edit: name, token, egress line, disabled models" onclick="openEdit(${a.id})"><svg viewBox="0 0 24 24"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>
@@ -194,24 +222,35 @@ function renderRows() {
           <label class="switch" title="Enable / disable"><input type="checkbox" ${a.status !== 'disabled' ? 'checked' : ''} onchange="toggleAccount(${a.id},this.checked)"><span class="switch-slider"></span></label>
         </div>
       </div>`;
-    }).join('');
+    }).join('') + (more > 0
+      ? `<button class="page-action-btn" style="margin:12px 0 4px" onclick="showMoreAccts()">Show ${Math.min(ACCT_PAGE, more)} more (${shown.length} / ${list.length})</button>`
+      : '');
 }
 function badge(s) { const m = { active:'Active', standby:'Standby', exhausted:'Exhausted', cooling:'Cooling', revoked:'Revoked', expired:'Expired', disabled:'Disabled' }; return `<span class="badge badge-${s}">${m[s] || s}</span>`; }
 
-async function claimAll(btn) { spinBtn(btn); toast('Claiming offered plans…', 'ok'); await post('/api/accounts/claim-all', {}); await refreshAccounts(); toast('Claim finished', 'ok'); }
-async function claimOne(id) { toast('Claiming…', 'ok'); await post('/api/accounts/claim-one', { id }); await refreshAccounts(); toast('Done', 'ok'); }
+async function claimAll(btn) { spinBtn(btn); await postProgress('/api/accounts/claim-all', { newest: acctSortDir < 0 }, 'Claim'); await refreshAccounts(); toast('Claim finished', 'ok'); }
+async function claimOne(id) { jobShow('Claim', 1); jobTick({ done: 0, total: 1, detail: '#' + id + ' in flight…' }); try { const d = await post('/api/accounts/claim-one', { id }); jobTick({ done: 1, total: 1, detail: d.claim || 'done' }); await refreshAccounts(); toast(d.claim || 'Done', 'ok'); } finally { setTimeout(jobHide, 700); } }
 async function refreshAccounts() {
   try {
     const d = await j('/api/accounts');
     console.log('[dash] accounts loaded:', (d.accounts || []).length);
     ACCOUNTS = d.accounts || [];
-    stats(); renderFilters(); renderRows(); tickClock();
+    stats(); renderFilters(); syncExpiredBtn(); renderRows(); tickClock();
   } catch (e) { console.error('[dash] refreshAccounts failed:', e); toast('Failed to load accounts: ' + e.message, 'err'); }
 }
-async function refreshOne(id) { await post('/api/accounts/refresh', { id }); await refreshAccounts(); }
-async function refreshAll(btn) { if (btn) spinBtn(btn); await post('/api/quota/refresh'); await refreshAccounts(); }
+async function selectAccount(id) { await post('/api/accounts/select', { id }); await refreshAccounts(); toast('Account #' + id + ' is now active', 'ok'); }
+async function refreshOne(id) { jobShow('Check', 1); jobTick({ done: 0, total: 1, detail: '#' + id + ' in flight…' }); try { await post('/api/accounts/refresh', { id }); jobTick({ done: 1, total: 1, detail: 'done' }); await refreshAccounts(); } finally { setTimeout(jobHide, 700); } }
+async function refreshAll(btn) { if (btn) spinBtn(btn); await postProgress('/api/quota/refresh', { newest: acctSortDir < 0 }, 'Check'); await refreshAccounts(); }
 async function toggleAccount(id, enabled) { await post('/api/accounts/toggle', { id, enabled }); await refreshAccounts(); }
 async function delAccount(id) { if (!confirm('Delete this account?')) return; await post('/api/accounts/remove', { id }); await refreshAccounts(); }
+async function deleteExpired() {
+  const n = ACCOUNTS.filter(a => displayStatus(a) === 'expired').length;
+  if (!n) return;
+  if (!confirm('Delete ' + n + ' expired account' + (n === 1 ? '' : 's') + '? This cannot be undone.')) return;
+  const d = await post('/api/accounts/delete-expired', {});
+  await refreshAccounts();
+  toast('Deleted ' + (d && d.deleted != null ? d.deleted : n) + ' expired', 'ok');
+}
 function doExport() { j('/api/accounts/export').then(d => {
   const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'zcode-accounts.json'; a.click();
@@ -337,7 +376,7 @@ async function saveEdit() {
 
 function boot() { console.log('[dash] boot'); refreshAccounts(); }
 gate(boot);
-setInterval(function () { if (DASH_TOKEN && !document.hidden) refreshAccounts(); }, 5000);
+setInterval(function () { if (DASH_TOKEN && !document.hidden && !JOB) refreshAccounts(); }, 5000);
 </script>
 </body>
 </html>

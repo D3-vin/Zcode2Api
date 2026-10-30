@@ -30,13 +30,12 @@ func chatTransport(proxyURL *url.URL) *http.Transport {
 		return v.(*http.Transport)
 	}
 	t := &http.Transport{
-		// custom DialContext without ForceAttemptHTTP2 keeps us on HTTP/1.1
-		// (go_eng parity: their identical setup passes the edge)
 		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 120 * time.Second,
 		MaxIdleConnsPerHost:   8,
 		IdleConnTimeout:       90 * time.Second,
+		DisableCompression:    true, // 23mac.har chat sends no Accept-Encoding
 	}
 	if proxyURL != nil {
 		t.Proxy = http.ProxyURL(proxyURL)
@@ -46,10 +45,16 @@ func chatTransport(proxyURL *url.URL) *http.Transport {
 }
 
 func egressLabel(proxyURL *url.URL) string {
-	if proxyURL != nil {
-		return proxyURL.String()
+	if proxyURL == nil {
+		return "direct"
 	}
-	return "direct"
+	if u := proxyURL.User; u != nil {
+		n := u.Username()
+		if i := strings.LastIndex(n, "sid_"); i >= 0 {
+			return n[i:] + "@" + proxyURL.Host
+		}
+	}
+	return proxyURL.Host
 }
 
 // sendChat POSTs the chat request through plain net/http; headers is the
@@ -61,6 +66,7 @@ func sendChat(ctx context.Context, proxyURL, target *url.URL, headers [][2]strin
 		return nil, err
 	}
 	req.ContentLength = int64(len(body))
+	req.Close = true
 	for _, kv := range headers {
 		req.Header.Set(kv[0], kv[1])
 	}

@@ -28,3 +28,5 @@ PROJECT_MAP.md
 
 # Node modules
 internal/captcha/captcha_node/node_modules/
+*.log
+_analyze/

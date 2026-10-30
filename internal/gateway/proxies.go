@@ -123,7 +123,9 @@ func (s *Server) apiProxyList(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	s.seedProfilesFromFile()
+	// No seeding here: with empty=re-seed semantics a seed on every list
+	// poll would resurrect the file right after Clear all. Boot seeds
+	// (NewServer); a refreshed proxy.txt loads with a plain restart.
 	writeJSON(w, map[string]any{"profiles": s.loadProxyProfiles()})
 }
 
@@ -178,6 +180,49 @@ func (s *Server) apiProxyDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.saveProxyProfiles(out)
 	writeJSON(w, map[string]any{"ok": true, "profiles": out})
+}
+
+// apiProxyClear wipes ALL profiles in one DB write — the UI Clear all must
+// not loop per-line deletes (thousands of sequential saves, each with a
+// full pool rebuild; one hiccup mid-loop strands the rest).
+func (s *Server) apiProxyClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	s.saveProxyProfiles(nil)
+	writeJSON(w, map[string]any{"ok": true, "profiles": []ProxyProfile{}})
+}
+
+// apiProxyImport bulk-adds proxy.txt-format lines in one DB write — the UI
+// bulk paste must not loop per-line saves (each save rebuilds the pool).
+func (s *Server) apiProxyImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Lines []string `json:"lines"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"bad body"}`, http.StatusBadRequest)
+		return
+	}
+	list := s.loadProxyProfiles()
+	base := time.Now().UnixMilli()
+	added := 0
+	for _, line := range body.Lines {
+		u, err := proxy.ParseProxyLine(line)
+		if err != nil {
+			continue // blanks/comments/garbage — same tolerance as the boot seed
+		}
+		list = append(list, ProxyProfile{
+			ID: base + int64(added), Name: u.Host, URL: u.String(), Mode: "sticky",
+		})
+		added++
+	}
+	s.saveProxyProfiles(list)
+	writeJSON(w, map[string]any{"ok": true, "added": added, "profiles": list})
 }
 
 var ipProbeServices = []string{
@@ -302,12 +347,16 @@ func extractIP(body string) string {
 	return ""
 }
 
-// profileForAccountMid resolves a bound proxy by the account's device-mid
-// (the identity PostMessages carries). nil = sticky pool.
+// profileForAccountMid resolves the account's egress line by device-mid
+// (the identity PostMessages carries): a manually bound dashboard profile
+// wins; otherwise the account's own auto-bound pool line — random on
+// first use, rebound only when the line stops answering (one account
+// walks from one IP, like N independent IDE installs). nil = no pool.
 func (s *Server) profileForAccountMid(deviceMid string) *url.URL {
 	if deviceMid == "" {
 		return nil
 	}
+	// manual dashboard binding first
 	accs, _ := s.store.Accounts()
 	for _, a := range accs {
 		if a.DeviceMid == deviceMid {
@@ -318,10 +367,126 @@ func (s *Server) profileForAccountMid(deviceMid string) *url.URL {
 					}
 				}
 			}
-			return nil
+			break
 		}
 	}
-	return nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if u, ok := s.accLine[deviceMid]; ok && u != nil && !s.lineHotLocked(u) {
+		return u
+	}
+	if s.proxies == nil || s.proxies.Len() == 0 {
+		return nil
+	}
+	u := s.pickCoolLineLocked(s.accLine[deviceMid])
+	if u == nil {
+		return s.accLine[deviceMid] // nothing cool left — keep the old binding
+	}
+	s.accLine[deviceMid] = u
+	s.store.SetSetting("line:"+deviceMid, u.String())
+	mid := deviceMid
+	if len(mid) > 8 {
+		mid = mid[:8]
+	}
+	log.Printf("[pool] line bound to account mid=%s…: %s", mid, mixLabel(u))
+	return u
+}
+
+// restoreAccountLines reloads the persisted per-account line bindings
+// (settings "line:<mid>"): the "one account = one IP" mapping must survive
+// restarts — re-randomizing the whole pool at every boot would present the
+// origin a mass IP switch. Stale bindings (line no longer in the pool) are
+// dropped and re-assigned on next use.
+func (s *Server) restoreAccountLines() {
+	if s.proxies == nil {
+		return
+	}
+	snap := make([]*url.URL, s.proxies.Len())
+	for i := range snap {
+		snap[i] = s.proxies.At(i)
+	}
+	restored := 0
+	for k, v := range s.store.SettingsWithPrefix("line:") {
+		u, err := url.Parse(v)
+		if err != nil || u.String() == "" || !containsURL(snap, u) {
+			s.store.SetSetting(k, "")
+			continue
+		}
+		s.accLine[strings.TrimPrefix(k, "line:")] = u
+		restored++
+	}
+	if restored > 0 {
+		log.Printf("[pool] restored %d account line bindings", restored)
+	}
+}
+
+// rebindAccountLine swaps a bound line that stopped answering for a fresh
+// random one (upstream reports connect-level failures of swap-0 egresses).
+func (s *Server) rebindAccountLine(deviceMid string, deadLine *url.URL) {
+	if deviceMid == "" || s.proxies == nil || s.proxies.Len() == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markHotLocked(deadLine)
+	u := s.pickCoolLineLocked(deadLine)
+	if u == nil {
+		return // nothing else to give — keep the old binding, swap-rotation covers
+	}
+	s.accLine[deviceMid] = u
+	s.store.SetSetting("line:"+deviceMid, u.String())
+	mid := deviceMid
+	if len(mid) > 8 {
+		mid = mid[:8]
+	}
+	log.Printf("[pool] line dead for account mid=%s… — rebound %s → %s", mid, mixLabel(deadLine), mixLabel(u))
+}
+
+const hotLineTTL = 30 * time.Minute
+
+func (s *Server) markHotLocked(u *url.URL) {
+	if u == nil || s.hotLine == nil {
+		return
+	}
+	s.hotLine[u.String()] = time.Now().Add(hotLineTTL)
+}
+
+func (s *Server) lineHotLocked(u *url.URL) bool {
+	if u == nil || s.hotLine == nil {
+		return false
+	}
+	until, ok := s.hotLine[u.String()]
+	return ok && time.Now().Before(until)
+}
+
+func (s *Server) pickCoolLineLocked(dead *url.URL) *url.URL {
+	if s.proxies == nil {
+		return nil
+	}
+	ex := map[string]struct{}{}
+	if dead != nil {
+		ex[dead.String()] = struct{}{}
+	}
+	now := time.Now()
+	for k, until := range s.hotLine {
+		if now.Before(until) {
+			ex[k] = struct{}{}
+		}
+	}
+	return s.proxies.RandomExcludingSet(ex)
+}
+
+func mixLabel(u *url.URL) string {
+	if u == nil {
+		return "none"
+	}
+	if usr := u.User; usr != nil {
+		n := usr.Username()
+		if i := strings.LastIndex(n, "sid_"); i >= 0 {
+			return n[i:] + "@" + u.Host
+		}
+	}
+	return u.Host
 }
 
 // bindAccount pins proxy profile pid to the account.

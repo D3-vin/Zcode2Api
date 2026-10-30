@@ -167,22 +167,27 @@ func (p *ProxyPool) Random() *url.URL {
 
 // RandomExcluding returns a random proxy different from exclude.
 func (p *ProxyPool) RandomExcluding(exclude *url.URL) *url.URL {
+	bad := map[string]struct{}{}
+	if exclude != nil {
+		bad[exclude.String()] = struct{}{}
+	}
+	return p.RandomExcludingSet(bad)
+}
+
+// RandomExcludingSet picks a random proxy whose String() is not in exclude.
+func (p *ProxyPool) RandomExcludingSet(exclude map[string]struct{}) *url.URL {
 	urls := p.snapshot()
 	if len(urls) == 0 {
 		return nil
 	}
-	bad := ""
-	if exclude != nil {
-		bad = exclude.String()
-	}
-	if len(urls) == 1 && urls[0].String() == bad {
-		return nil
-	}
-	for i := 0; i < len(urls); i++ {
-		u := urls[rand.Intn(len(urls))]
-		if u.String() != bad {
-			return u
+	var ok []*url.URL
+	for _, u := range urls {
+		if _, skip := exclude[u.String()]; !skip {
+			ok = append(ok, u)
 		}
 	}
-	return nil
+	if len(ok) == 0 {
+		return nil
+	}
+	return ok[rand.Intn(len(ok))]
 }

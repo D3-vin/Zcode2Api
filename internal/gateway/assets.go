@@ -11,10 +11,10 @@ import (
 // code but never present in the repo, so the system injection silently
 // no-oped and every request left without a system prompt.
 //
-// The blocks are the official client identity
-// blocks; content inspection rejects requests without them — 3012).
+// The blocks are the 23mac.har identity (mac_ping_system.json). The short
+// zcode_system.json stub (Environment: unknown) 3012's on /messages.
 
-//go:embed assets/zcode_system.json
+//go:embed assets/mac_ping_system.json
 var embeddedSystem []byte
 
 var (

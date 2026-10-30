@@ -8,8 +8,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"zcode2api/internal/config"
+	"zcode2api/internal/store"
 	"zcode2api/internal/upstream"
 )
 
@@ -84,6 +87,45 @@ func (s *Server) apiAccounts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"accounts": s.accountsJSON()})
 }
 
+type scanJob struct {
+	id       int64
+	jwt, mid string
+}
+
+// scanQuotas fills the accounts' quota snapshots in parallel (the bulk-add
+// background tail; same worker cap as the quota refresh button).
+func (s *Server) scanQuotas(jobs []scanJob) {
+	if len(jobs) == 0 {
+		return
+	}
+	n := s.cfg.BillingWorkers
+	if n < 1 {
+		n = 1
+	}
+	if n > 32 {
+		n = 32
+	}
+	sem := make(chan struct{}, n)
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		j := j
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if q, err := s.up.Billing(j.jwt, j.mid); err == nil && !upstream.IsEmptyGrant(q) {
+				s.mu.Lock()
+				_ = s.store.UpdateQuota(j.id, q)
+				s.catalog.MergeFromQuota(q)
+				s.mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	log.Printf("[pool] bulk-add quota scans done: %d accounts", len(jobs))
+}
+
 func (s *Server) apiAccountsAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -98,25 +140,25 @@ func (s *Server) apiAccountsAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// bulk: newline-separated JWTs in one field — each lands as its own
-	// account (admin paste pattern)
+	// account (admin paste pattern). The form responds as soon as the rows
+	// exist; the per-account billing scans continue in the background
+	// (quotas fill in, the monitor re-checks anyway).
 	lines := strings.FieldsFunc(body.JWT, func(r rune) bool { return r == 10 || r == 13 })
 	if len(lines) > 1 {
+		var jobs []scanJob
 		added, skipped := 0, 0
 		for _, ln := range lines {
-			ln = strings.TrimSpace(ln)
-			if ln == "" {
+			if ln = strings.TrimSpace(ln); ln == "" {
 				continue
 			}
 			if a, err := s.store.Add(ln, body.Label); err != nil {
 				skipped++
 			} else {
 				added++
-				if q, err := s.up.Billing(a.JWT, a.DeviceMid); err == nil && !upstream.IsEmptyGrant(q) {
-					_ = s.store.UpdateQuota(a.ID, q)
-					s.catalog.MergeFromQuota(q)
-				}
+				jobs = append(jobs, scanJob{id: a.ID, jwt: a.JWT, mid: a.DeviceMid})
 			}
 		}
+		go s.scanQuotas(jobs)
 		writeJSON(w, map[string]any{"ok": true, "added": added, "skipped": skipped, "accounts": s.accountsJSON()})
 		return
 	}
@@ -154,6 +196,19 @@ func (s *Server) apiAccountsRemove(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+func (s *Server) apiAccountsDeleteExpired(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	n, err := s.store.DeleteExpired()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "deleted": n, "accounts": s.accountsJSON()})
+}
+
 func (s *Server) apiAccountsSelect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -163,11 +218,31 @@ func (s *Server) apiAccountsSelect(w http.ResponseWriter, r *http.Request) {
 		ID int64 `json:"id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	accs, _ := s.store.Accounts()
+	var found *store.Account
+	for i := range accs {
+		if accs[i].ID == body.ID {
+			found = &accs[i]
+			break
+		}
+	}
+	if found == nil {
+		http.Error(w, `{"error":"no such account"}`, http.StatusNotFound)
+		return
+	}
+	if found.Status != "" {
+		http.Error(w, `{"error":"account is `+found.Status+`"}`, http.StatusBadRequest)
+		return
+	}
 	if err := s.store.Select(body.ID); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	// drop per-model stickies so the next chat request lands on this account
+	s.mu.Lock()
+	s.stickyAcc = map[string]int64{}
+	s.mu.Unlock()
+	writeJSON(w, map[string]any{"ok": true, "accounts": s.accountsJSON()})
 }
 
 func (s *Server) apiAccountsImport(w http.ResponseWriter, r *http.Request) {
@@ -202,28 +277,79 @@ func (s *Server) apiAccountsClaimAll(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	s.mu.Lock()
+	okClaim := s.autoClaim
+	s.mu.Unlock()
+	if !okClaim {
+		writeJSONError(w, http.StatusConflict, "auto-claim is off (Settings) — enable it to claim plans")
+		return
+	}
+	var body struct {
+		Newest bool `json:"newest"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
 	accs, err := s.store.Accounts()
 	if err != nil {
 		writeJSON(w, map[string]any{"error": err.Error()})
 		return
 	}
+	if body.Newest {
+		reverseAccounts(accs)
+	}
+	n := s.cfg.BillingWorkers
+	if n < 1 {
+		n = 1
+	}
+	if !s.cfg.CaptchaOff && s.cfg.CaptchaMinters > 0 && n > s.cfg.CaptchaMinters {
+		n = s.cfg.CaptchaMinters
+	}
+	if n > 32 {
+		n = 32
+	}
+	work := accs[:0]
 	for _, a := range accs {
+		if a.JWT != "" {
+			work = append(work, a)
+		}
+	}
+	order := "oldest-first"
+	if body.Newest {
+		order = "newest-first"
+	}
+	log.Printf("[claim] all start accounts=%d workers=%d %s", len(work), n, order)
+	emit := beginNDJSON(w)
+	emit(massEvt{Event: "start", Kind: "claim", Total: len(work)})
+	var nDone atomic.Int32
+	s.forEachAccount(work, n, func(a store.Account) {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 		claimed, problems := s.up.ClaimOfferedPlans(ctx, a.JWT, a.DeviceMid)
 		cancel()
-		if claimed != "" {
-			log.Printf("[claim] %s claimed: %s", maskJWT(a.JWT), claimed)
-		} else if problems != "" {
-			log.Printf("[claim] %s %s", maskJWT(a.JWT), problems)
+		logClaim("all", a.ID, a.JWT, claimed, problems)
+		ok := claimed != "" || strings.HasPrefix(problems, "already have:")
+		detail := claimed
+		if detail == "" {
+			detail = problems
 		}
-	}
-	writeJSON(w, map[string]any{"ok": true, "accounts": s.accountsJSON()})
+		if detail == "" {
+			detail = "nothing offered"
+		}
+		emit(massEvt{Event: "tick", Kind: "claim", Done: int(nDone.Add(1)), Total: len(work), ID: a.ID, OK: ok, Detail: clip(fmt.Sprintf("#%d %s", a.ID, detail), 96)})
+	})
+	log.Printf("[claim] all done")
+	emit(massEvt{Event: "done", Kind: "claim", Done: len(work), Total: len(work), OK: true})
 }
 
 // apiAccountsClaimOne claims the offered plans of a single account.
 func (s *Server) apiAccountsClaimOne(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	okClaim := s.autoClaim
+	s.mu.Unlock()
+	if !okClaim {
+		writeJSONError(w, http.StatusConflict, "auto-claim is off (Settings) — enable it to claim plans")
 		return
 	}
 	var body struct {
@@ -235,22 +361,56 @@ func (s *Server) apiAccountsClaimOne(w http.ResponseWriter, r *http.Request) {
 		if a.ID != body.ID {
 			continue
 		}
+		log.Printf("[claim] one #%d %s start", a.ID, maskJWT(a.JWT))
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 		claimed, problems := s.up.ClaimOfferedPlans(ctx, a.JWT, a.DeviceMid)
 		cancel()
+		logClaim("one", a.ID, a.JWT, claimed, problems)
 		msg := claimed
 		if msg == "" {
 			msg = problems
 		}
+		if msg == "" {
+			msg = "nothing offered"
+		}
 		writeJSON(w, map[string]any{"ok": true, "claim": msg})
 		return
 	}
+	log.Printf("[claim] one #%d not found", body.ID)
 	http.Error(w, `{"error":"no such account"}`, http.StatusNotFound)
 }
 
+func logClaim(kind string, id int64, jwt, claimed, problems string) {
+	who := fmt.Sprintf("%s #%d %s", kind, id, maskJWT(jwt))
+	switch {
+	case claimed != "" && problems != "":
+		log.Printf("[claim] %s claimed: %s; also: %s", who, claimed, problems)
+	case claimed != "":
+		log.Printf("[claim] %s claimed: %s", who, claimed)
+	case strings.HasPrefix(problems, "already have:"):
+		log.Printf("[claim] %s skip %s", who, problems)
+	case problems != "":
+		log.Printf("[claim] %s failed: %s", who, problems)
+	default:
+		log.Printf("[claim] %s nothing offered", who)
+	}
+}
+
 func (s *Server) apiQuotaRefresh(w http.ResponseWriter, r *http.Request) {
-	checked, dropped := s.refreshAllBilling()
-	writeJSON(w, map[string]any{"ok": true, "checked": checked, "dropped": dropped, "accounts": s.accountsJSON()})
+	var body struct {
+		Newest bool `json:"newest"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	emit := beginNDJSON(w)
+	emit(massEvt{Event: "start", Kind: "check"})
+	checked, dropped := s.refreshAllBillingOrder(body.Newest, func(done, total int, id int64, ok bool, detail string) {
+		label := ""
+		if id != 0 {
+			label = clip(fmt.Sprintf("#%d %s", id, detail), 96)
+		}
+		emit(massEvt{Event: "tick", Kind: "check", Done: done, Total: total, ID: id, OK: ok, Detail: label})
+	})
+	emit(massEvt{Event: "done", Kind: "check", Checked: checked, Dropped: dropped, OK: true})
 }
 
 // apiAccountsExport backs the pool up as JSON (device identities included).
@@ -391,6 +551,13 @@ func (s *Server) apiSettings(w http.ResponseWriter, r *http.Request) {
 			"captcha_pool_max":  s.store.Setting("captcha_pool_max", "10"),
 			"captcha_pool_ttl":  s.store.Setting("captcha_pool_ttl", "95s"),
 			"gateway_key_set":   s.cfg.GatewayKey != "",
+			"chat_dump":         s.chatDumpPath() != "",
+			"chat_dump_path":    s.cfg.ChatDump,
+			"auto_claim": func() bool {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				return s.autoClaim
+			}(),
 		})
 		return
 	}
@@ -401,6 +568,8 @@ func (s *Server) apiSettings(w http.ResponseWriter, r *http.Request) {
 		CaptchaPoolMin  int    `json:"captcha_pool_min"`
 		CaptchaPoolMax  int    `json:"captcha_pool_max"`
 		CaptchaPoolTTL  string `json:"captcha_pool_ttl"`
+		ChatDump        *bool  `json:"chat_dump"`
+		AutoClaim       *bool  `json:"auto_claim"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.AdminPassword != "" {
@@ -429,7 +598,67 @@ func (s *Server) apiSettings(w http.ResponseWriter, r *http.Request) {
 			s.store.SetSetting("captcha_pool_ttl", body.CaptchaPoolTTL)
 		}
 	}
+	if body.ChatDump != nil {
+		s.mu.Lock()
+		s.chatDump = *body.ChatDump
+		s.mu.Unlock()
+		v := "0"
+		if *body.ChatDump {
+			v = "1"
+		}
+		s.store.SetSetting("chat_dump", v)
+	}
+	if body.AutoClaim != nil {
+		s.mu.Lock()
+		s.autoClaim = *body.AutoClaim
+		s.mu.Unlock()
+		v := "0"
+		if *body.AutoClaim {
+			v = "1"
+		}
+		s.store.SetSetting("auto_claim", v)
+	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+type massEvt struct {
+	Event   string `json:"event"`
+	Kind    string `json:"kind,omitempty"`
+	Done    int    `json:"done"`
+	Total   int    `json:"total"`
+	ID      int64  `json:"id,omitempty"`
+	OK      bool   `json:"ok,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+	Checked int    `json:"checked,omitempty"`
+	Dropped int    `json:"dropped,omitempty"`
+}
+
+func beginNDJSON(w http.ResponseWriter) func(massEvt) {
+	var mu sync.Mutex
+	fl, _ := w.(http.Flusher)
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	return func(ev massEvt) {
+		b, err := json.Marshal(ev)
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		_, _ = w.Write(b)
+		_, _ = w.Write([]byte("\n"))
+		if fl != nil {
+			fl.Flush()
+		}
+	}
+}
+
+func clip(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 func writeJSONError(w http.ResponseWriter, code int, msg string) {

@@ -31,6 +31,18 @@ type captchaCfg struct {
 	Prefix  string
 	Region  string
 	SceneID string
+	// SkipModelRequest: the origin lifted the captcha requirement for
+	// chat requests (client/configs, observed 2026-10-08 with IDE 3.14.4:
+	// POST /messages → 200 with no captcha headers at all).
+	SkipModelRequest bool
+}
+
+// SkipModelRequest reports the origin's skip_model_request flag (live
+// client/configs, cached): when true, chat requests carry no captcha
+// headers — the origin does not require them. Unknown config (fetch
+// failed) reports false: keep minting, the safe default.
+func SkipModelRequest(ctx context.Context) bool {
+	return fetchCaptchaCfg(ctx).SkipModelRequest
 }
 
 // ClientConfigs fetches the origin client/configs document (5-minute
@@ -43,7 +55,7 @@ func ClientConfigs(ctx context.Context) []byte {
 		return cfgRaw
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		config.OriginBaseURL+"/api/v1/client/configs?app_version="+url.QueryEscape(config.ClientVersion), nil)
+		config.OriginBaseURL+"/api/v1/client/configs?app_version="+url.QueryEscape(config.ClientVersion)+"&platform="+url.QueryEscape(config.ClientPlatform), nil)
 	if err != nil {
 		return cfgRaw
 	}
@@ -64,6 +76,14 @@ var (
 	cfgAt  time.Time
 )
 
+// ResetConfigsCache drops the cached client/configs document — tests use
+// it to control the skip_model_request state deterministically.
+func ResetConfigsCache() {
+	cfgMu.Lock()
+	cfgRaw, cfgAt = nil, time.Time{}
+	cfgMu.Unlock()
+}
+
 // fetchCaptchaCfg parses the captcha section of client/configs, falling
 // back to the baked defaults when there is no data (dead egress, mitm
 // CA, ...).
@@ -78,10 +98,11 @@ func fetchCaptchaCfg(ctx context.Context) captchaCfg {
 		Data struct {
 			Configs struct {
 				Captcha struct {
-					Enabled *bool  `json:"enabled"`
-					Prefix  string `json:"prefix"`
-					Region  string `json:"region"`
-					SceneID string `json:"sceneId"`
+					Enabled          *bool  `json:"enabled"`
+					Prefix           string `json:"prefix"`
+					Region           string `json:"region"`
+					SceneID          string `json:"sceneId"`
+					SkipModelRequest bool   `json:"skip_model_request"`
 				} `json:"captcha"`
 			} `json:"configs"`
 		} `json:"data"`
@@ -91,7 +112,7 @@ func fetchCaptchaCfg(ctx context.Context) captchaCfg {
 	}
 	cc := wrap.Data.Configs.Captcha
 	if cc.Prefix != "" {
-		c = captchaCfg{Enabled: cc.Enabled == nil || *cc.Enabled, Prefix: cc.Prefix, Region: cc.Region, SceneID: cc.SceneID}
+		c = captchaCfg{Enabled: cc.Enabled == nil || *cc.Enabled, Prefix: cc.Prefix, Region: cc.Region, SceneID: cc.SceneID, SkipModelRequest: cc.SkipModelRequest}
 	}
 	return c
 }
