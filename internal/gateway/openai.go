@@ -298,8 +298,9 @@ func (s *Server) writeOpenAIFromOrigin(w http.ResponseWriter, resp *http.Respons
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	fl, _ := w.(http.Flusher)
+	st := &oaStreamState{toolIdx: map[int]int{}}
 	err := scanAnthropicSSE(src, func(ev string, data map[string]any) {
-		chunk := anthEventToOA(ev, data, id, outModel)
+		chunk := anthEventToOA(ev, data, id, outModel, st)
 		if chunk == nil {
 			return
 		}
@@ -328,19 +329,40 @@ func writeOpenAIFromJSON(w http.ResponseWriter, status int, body io.Reader, id, 
 	}
 	var doc struct {
 		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type  string          `json:"type"`
+			Text  string          `json:"text"`
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
 		} `json:"content"`
+		StopReason string `json:"stop_reason"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		writeOpenAIError(w, status, string(raw))
 		return
 	}
 	text := strings.Builder{}
+	var tools []any
 	for _, b := range doc.Content {
-		if b.Type == "text" {
+		switch b.Type {
+		case "text":
 			text.WriteString(b.Text)
+		case "tool_use":
+			args := string(b.Input)
+			if args == "" || args == "null" {
+				args = "{}"
+			}
+			tools = append(tools, map[string]any{
+				"id": b.ID, "type": "function",
+				"function": map[string]any{"name": b.Name, "arguments": args},
+			})
 		}
+	}
+	msg := map[string]any{"role": "assistant", "content": text.String()}
+	finish := oaFinishReason(doc.StopReason)
+	if len(tools) > 0 {
+		msg["tool_calls"] = tools
+		finish = "tool_calls"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -350,8 +372,7 @@ func writeOpenAIFromJSON(w http.ResponseWriter, status int, body io.Reader, id, 
 		"created": time.Now().Unix(),
 		"model":   outModel,
 		"choices": []any{map[string]any{
-			"index": 0, "message": map[string]any{"role": "assistant", "content": text.String()},
-			"finish_reason": "stop",
+			"index": 0, "message": msg, "finish_reason": finish,
 		}},
 	})
 }
@@ -418,7 +439,27 @@ func scanAnthropicSSE(r io.Reader, fn func(event string, data map[string]any)) e
 	return sc.Err()
 }
 
-func anthEventToOA(ev string, data map[string]any, id, model string) map[string]any {
+// oaStreamState tracks one converted stream. OpenAI numbers tool calls
+// 0,1,2… among tool calls only, while Anthropic's index counts every content
+// block (thinking and text included), so the two must be mapped. finished
+// records that finish_reason was already sent so message_stop doesn't
+// overwrite "tool_calls" with "stop".
+type oaStreamState struct {
+	toolIdx  map[int]int
+	finished bool
+}
+
+func oaFinishReason(stopReason string) string {
+	switch stopReason {
+	case "tool_use":
+		return "tool_calls"
+	case "max_tokens":
+		return "length"
+	}
+	return "stop"
+}
+
+func anthEventToOA(ev string, data map[string]any, id, model string, st *oaStreamState) map[string]any {
 	delta := map[string]any{}
 	var finish *string
 	switch ev {
@@ -430,7 +471,10 @@ func anthEventToOA(ev string, data map[string]any, id, model string) map[string]
 		case "thinking_delta":
 			delta["reasoning_content"] = upstream.Str(d["thinking"])
 		case "input_json_delta":
-			idx := upstream.AsInt(data["index"])
+			idx, ok := st.toolIdx[upstream.AsInt(data["index"])]
+			if !ok {
+				return nil
+			}
 			delta["tool_calls"] = []any{map[string]any{
 				"index": idx, "function": map[string]any{"arguments": upstream.Str(d["partial_json"])},
 			}}
@@ -442,7 +486,8 @@ func anthEventToOA(ev string, data map[string]any, id, model string) map[string]
 		if upstream.Str(cb["type"]) != "tool_use" {
 			return nil
 		}
-		idx := upstream.AsInt(data["index"])
+		idx := len(st.toolIdx)
+		st.toolIdx[upstream.AsInt(data["index"])] = idx
 		delta["tool_calls"] = []any{map[string]any{
 			"index": idx, "id": upstream.Str(cb["id"]), "type": "function",
 			"function": map[string]any{"name": upstream.Str(cb["name"]), "arguments": ""},
@@ -450,15 +495,17 @@ func anthEventToOA(ev string, data map[string]any, id, model string) map[string]
 	case "message_delta":
 		md, _ := data["delta"].(map[string]any)
 		if sr := upstream.Str(md["stop_reason"]); sr != "" {
-			fr := "stop"
-			if sr == "tool_use" {
-				fr = "tool_calls"
-			}
+			fr := oaFinishReason(sr)
 			finish = &fr
+			st.finished = true
 		}
 	case "message_stop":
+		if st.finished {
+			return nil
+		}
 		fr := "stop"
 		finish = &fr
+		st.finished = true
 	default:
 		return nil
 	}
