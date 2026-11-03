@@ -76,7 +76,7 @@ async function postProgress(url, body, kind) {
     if (ct.indexOf('ndjson') < 0) {
       var text = await res.text();
       var d; try { d = JSON.parse(text); } catch (e) { throw e; }
-      if (d && d.error) throw new Error(d.error);
+      if (!res.ok || (d && d.error)) throw new Error((d && d.error) || ('HTTP ' + res.status));
       jobTick({ done: 1, total: 1, detail: 'done' });
       return d;
     }

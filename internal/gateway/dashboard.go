@@ -135,23 +135,28 @@ func (s *Server) apiAccountsAdd(w http.ResponseWriter, r *http.Request) {
 		JWT   string `json:"jwt"`
 		Label string `json:"label"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.JWT == "" {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.JWT) == "" {
 		http.Error(w, `{"error":"jwt required"}`, http.StatusBadRequest)
 		return
 	}
-	// bulk: newline-separated JWTs in one field — each lands as its own
-	// account (admin paste pattern). The form responds as soon as the rows
-	// exist; the per-account billing scans continue in the background
-	// (quotas fill in, the monitor re-checks anyway).
-	lines := strings.FieldsFunc(body.JWT, func(r rune) bool { return r == 10 || r == 13 })
-	if len(lines) > 1 {
+	// One line per account: a raw JWT, or email:pass:token (email → label).
+	// Several lines: rows land immediately, billing scans in the background.
+	creds := parseCredentialBlob(body.JWT)
+	if len(creds) == 0 {
+		http.Error(w, `{"error":"jwt required"}`, http.StatusBadRequest)
+		return
+	}
+	labelOf := func(c credLine) string {
+		if c.label != "" {
+			return c.label
+		}
+		return body.Label
+	}
+	if len(creds) > 1 {
 		var jobs []scanJob
 		added, skipped := 0, 0
-		for _, ln := range lines {
-			if ln = strings.TrimSpace(ln); ln == "" {
-				continue
-			}
-			if a, err := s.store.Add(ln, body.Label); err != nil {
+		for _, c := range creds {
+			if a, err := s.store.Add(c.jwt, labelOf(c)); err != nil {
 				skipped++
 			} else {
 				added++
@@ -162,7 +167,7 @@ func (s *Server) apiAccountsAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "added": added, "skipped": skipped, "accounts": s.accountsJSON()})
 		return
 	}
-	a, err := s.store.Add(body.JWT, body.Label)
+	a, err := s.store.Add(creds[0].jwt, labelOf(creds[0]))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -277,13 +282,6 @@ func (s *Server) apiAccountsClaimAll(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	s.mu.Lock()
-	okClaim := s.autoClaim
-	s.mu.Unlock()
-	if !okClaim {
-		writeJSONError(w, http.StatusConflict, "auto-claim is off (Settings) — enable it to claim plans")
-		return
-	}
 	var body struct {
 		Newest bool `json:"newest"`
 	}
@@ -343,13 +341,6 @@ func (s *Server) apiAccountsClaimAll(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiAccountsClaimOne(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	s.mu.Lock()
-	okClaim := s.autoClaim
-	s.mu.Unlock()
-	if !okClaim {
-		writeJSONError(w, http.StatusConflict, "auto-claim is off (Settings) — enable it to claim plans")
 		return
 	}
 	var body struct {
@@ -438,9 +429,17 @@ func (s *Server) apiAccountsImportJSON(w http.ResponseWriter, r *http.Request) {
 	}
 	var payload struct {
 		Accounts []map[string]any `json:"accounts"`
+		Text     string           `json:"text"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || len(payload.Accounts) == 0 {
-		http.Error(w, `{"error":"json body {accounts:[...]} required"}`, http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, `{"error":"json body {accounts:[...]} or {text} required"}`, http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(payload.Text) != "" {
+		payload.Accounts = accountsFromCredentialText(payload.Text)
+	}
+	if len(payload.Accounts) == 0 {
+		http.Error(w, `{"error":"json body {accounts:[...]} or txt email:pass:token required"}`, http.StatusBadRequest)
 		return
 	}
 	added, skipped := s.store.ImportAccounts(payload.Accounts)

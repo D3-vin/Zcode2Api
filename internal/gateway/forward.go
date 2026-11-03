@@ -278,7 +278,7 @@ var modelNameMap = map[string]string{
 	"claude-opus-4-8":         "GLM-5.3",
 	"claude-opus-5-5":         "GLM-5.3",
 	"opus":                    "GLM-5.3",
-	"claude-sonnet-4-6":       "GLM-5.3",
+	"claude-sonnet-4-6":       "GLM-5.3-Flash",
 	"claude-sonnet-5-5":       "GLM-5.3-Flash",
 	"sonnet":                  "GLM-5.3-Flash",
 	"claude-3-5-haiku-latest": "GLM-5.3-Flash",

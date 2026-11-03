@@ -94,7 +94,7 @@
     </div>
     <div class="dialog-body" id="add-pane-paste" style="display:none">
       <div><span class="dialog-label">Tokens</span>
-        <textarea class="input" id="paste-tokens" rows="6" placeholder="One Coding Plan JWT per line — existing ones are skipped automatically"></textarea></div>
+        <textarea class="input" id="paste-tokens" rows="6" placeholder="One per line: JWT, or email:pass:token — existing JWTs are skipped"></textarea></div>
       <div><span class="dialog-label">Egress line</span>
         <select class="input" id="paste-egress"><option value="pool" selected>Pool — random from all lines</option></select></div>
       <div class="dialog-help">Bulk from file is served by env (ZCODE_KEYS=tokens.txt) at startup — here paste is for quick additions.</div>
@@ -127,7 +127,7 @@
   </div>
 </div>
 
-<input type="file" id="import-file" accept=".json" style="display:none" onchange="onImportFile(this)">
+<input type="file" id="import-file" accept=".json,.txt,text/plain" style="display:none" onchange="onImportFile(this)">
 <div class="toast-container" id="toasts"></div>
 
 <script src="/app.js?v=1.1.0"></script>
@@ -228,7 +228,7 @@ function renderRows() {
 }
 function badge(s) { const m = { active:'Active', standby:'Standby', exhausted:'Exhausted', cooling:'Cooling', revoked:'Revoked', expired:'Expired', disabled:'Disabled' }; return `<span class="badge badge-${s}">${m[s] || s}</span>`; }
 
-async function claimAll(btn) { spinBtn(btn); await postProgress('/api/accounts/claim-all', { newest: acctSortDir < 0 }, 'Claim'); await refreshAccounts(); toast('Claim finished', 'ok'); }
+async function claimAll(btn) { spinBtn(btn); try { await postProgress('/api/accounts/claim-all', { newest: acctSortDir < 0 }, 'Claim'); await refreshAccounts(); toast('Claim finished', 'ok'); } catch (e) { toast('Claim failed: ' + (e && e.message ? e.message : e), 'err'); } }
 async function claimOne(id) { jobShow('Claim', 1); jobTick({ done: 0, total: 1, detail: '#' + id + ' in flight…' }); try { const d = await post('/api/accounts/claim-one', { id }); jobTick({ done: 1, total: 1, detail: d.claim || 'done' }); await refreshAccounts(); toast(d.claim || 'Done', 'ok'); } finally { setTimeout(jobHide, 700); } }
 async function refreshAccounts() {
   try {
@@ -262,10 +262,18 @@ async function onImportFile(input) {
   if (!f) return;
   try {
     const text = await f.text();
-    const parsed = JSON.parse(text);
-    const list = Array.isArray(parsed) ? parsed : (parsed.accounts || []);
-    if (!list.length) { toast('No accounts in file', 'err'); return; }
-    const d = await post('/api/accounts/restore', { accounts: list });
+    const name = (f.name || '').toLowerCase();
+    let body;
+    if (name.endsWith('.txt')) {
+      body = { text };
+    } else {
+      const parsed = JSON.parse(text);
+      const list = Array.isArray(parsed) ? parsed : (parsed.accounts || []);
+      if (!list.length) { toast('No accounts in file', 'err'); return; }
+      body = { accounts: list };
+    }
+    const d = await post('/api/accounts/restore', body);
+    if (d && d.error) { toast(d.error, 'err'); return; }
     toast('Imported ' + (d.added || 0) + ', skipped ' + (d.skipped || 0), 'ok');
     await refreshAccounts();
   } catch (e) {
