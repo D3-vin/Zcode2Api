@@ -12,7 +12,7 @@ OpenAI & Anthropic-compatible proxy for Z.AI (ZCode Start Plan) with JWT account
 
 [Features](#features) • [Quick Start](#quick-start) • [Usage](#usage) • [Configuration](#configuration) • [API Endpoints](#api-endpoints) • [Contact](#contact)
 
-[English](#) | [Русский](README_RU.md)
+[English](#) | [Русский](README_RU.md) | [简体中文](README_zh.md)
 
 ---
 

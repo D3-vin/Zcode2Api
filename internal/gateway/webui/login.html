@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/app.css?v=1.0.6">
 </head>
 <body class="login-body">
+  <select id="lang-select" onchange="setLang(this.value)" title="Language" style="position:fixed;top:14px;right:16px;z-index:99;background:#161b22;border:1px solid rgba(255,255,255,.14);color:#9aa4b2;border-radius:8px;padding:4px 6px;font-size:12px;cursor:pointer;outline:none;font-family:inherit"><option value="en">EN</option><option value="zh">中文</option><option value="ru">Русский</option></select>
   <div class="login-card">
     <div class="login-brand">
       <span class="brand-word" style="font-size:17px">Zcode<b>2</b>Api</span>
@@ -40,5 +41,6 @@ document.getElementById('pw').addEventListener('keypress', e => { if (e.key === 
 // already logged in → straight in
 (async () => { if (DASH_TOKEN && await verify(DASH_TOKEN)) location.href = '/'; })();
 </script>
+<script src="/i18n.js?v=1.0.0"></script>
 </body>
 </html>
