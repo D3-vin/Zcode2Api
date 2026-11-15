@@ -4,10 +4,12 @@
 //  1. POST /api/v1/event/report ×2 (app_launch, app_daily_active) — NO
 //     Authorization; the 16-field body is keyed by device_mid (upstream
 //     dedups daily-active by device_mid+date).
-//  2. GET  billing/preview → POST billing/claim for EVERY plan the origin
-//     itself offers (the offer list is the filter — no name heuristics),
-//     priority first, with a freshly minted captcha param; 3007 retries
-//     once with a re-minted param, 1003 already-claimed is a success.
+//  2. GET billing/preview and GET marketing/touch?seq=0 → POST billing/claim
+//     for every plan_id either list offers that balance does not already
+//     have (no name heuristics), preview priority first. Touch plan ids
+//     come only from deliveries[].banner.buttons[].action.args.plan_id.
+//     After claim code 0 or 1003, one POST marketing/touch/action confirm
+//     per campaign_id. 3007 retries once with a re-minted captcha.
 //
 // No standalone balance call in the sequence; the dashboard quota refresh
 // picks the granted state up.
@@ -86,23 +88,72 @@ func (c *Client) postEvent(ctx context.Context, jwt, element, userID, mid string
 	return nil
 }
 
-// ClaimOfferedPlans: preview returns the
-// plans the ORIGIN itself offers this account — claim every one of them,
-// priority first (the offer list IS the filter, no name heuristics).
-// Returns the claimed plan names and a joined problem string (both may be
-// empty when nothing is offered). The manual dashboard Claim runs exactly
-// this (no activation events — those belong to the warm admission flow).
+// claimOffer is one origin plan_id. Campaign is set when marketing/touch
+// named it; preview-only offers leave it empty (no confirm).
+type claimOffer struct {
+	id, name, campaign string
+}
+
+// ClaimOfferedPlans claims every plan the origin offers via billing/preview
+// or marketing/touch, skipping ids already on balance. Preview keeps its
+// priority order; touch-only ids follow. A preview failure still queries
+// touch. Returns claimed names and a joined problem string.
 func (c *Client) ClaimOfferedPlans(ctx context.Context, jwt, mid string) (string, string) {
 	base := config.OriginBaseURL + "/api/v1/zcode-plan"
+	var problems []string
+	offers, seen := c.previewOffers(ctx, jwt, mid, base, &problems)
+	c.mergeTouchOffers(ctx, jwt, mid, &offers, seen, &problems)
+
+	owned := map[string]bool{}
+	if q, err := c.Billing(jwt, mid); err == nil {
+		for _, id := range q.PlanIDs {
+			owned[strings.ToLower(id)] = true
+		}
+	}
+	var claimed, skipped []string
+	confirmed := map[string]bool{}
+	for _, p := range offers {
+		name := p.name
+		if name == "" {
+			name = p.id
+		}
+		if owned[strings.ToLower(p.id)] {
+			skipped = append(skipped, name)
+			continue
+		}
+		if err := c.claimPlan(ctx, base, jwt, mid, p.id); err != nil {
+			problems = append(problems, err.Error())
+			continue
+		}
+		claimed = append(claimed, name)
+		if p.campaign != "" && !confirmed[p.campaign] {
+			confirmed[p.campaign] = true
+			if err := c.confirmTouch(ctx, jwt, mid, p.campaign); err != nil {
+				problems = append(problems, err.Error())
+			}
+		}
+	}
+	if len(claimed) == 0 && len(problems) == 0 && len(skipped) > 0 {
+		return "", "already have: " + strings.Join(skipped, ", ")
+	}
+	return strings.Join(claimed, ", "), strings.Join(problems, "; ")
+}
+
+func (c *Client) previewOffers(ctx context.Context, jwt, mid, base string, problems *[]string) ([]claimOffer, map[string]int) {
+	offers := []claimOffer{}
+	seen := map[string]int{}
 	status, raw, err := c.getJSON(ctx, http.MethodGet, base+"/billing/preview?app_version="+config.BillingClientVersion+"&platform="+config.ClientPlatform, jwt, mid, nil, nil)
 	if err != nil {
-		return "", "preview: " + err.Error()
+		*problems = append(*problems, "preview: "+err.Error())
+		return offers, seen
 	}
 	if status != 200 {
-		return "", fmt.Sprintf("preview HTTP %d: %s", status, BodySnip(raw, 120))
+		*problems = append(*problems, fmt.Sprintf("preview HTTP %d: %s", status, BodySnip(raw, 120)))
+		return offers, seen
 	}
 	var pw struct {
-		Code int `json:"code"`
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
 		Data struct {
 			Plans []struct {
 				PlanID   string `json:"plan_id"`
@@ -112,40 +163,125 @@ func (c *Client) ClaimOfferedPlans(ctx context.Context, jwt, mid string) (string
 		} `json:"data"`
 	}
 	if json.Unmarshal(raw, &pw) != nil || pw.Code != 0 {
-		return "", fmt.Sprintf("preview code %d", pw.Code)
+		*problems = append(*problems, fmt.Sprintf("preview code %d %s", pw.Code, pw.Msg))
+		return offers, seen
 	}
 	sort.SliceStable(pw.Data.Plans, func(i, j int) bool { return pw.Data.Plans[i].Priority > pw.Data.Plans[j].Priority })
-	owned := map[string]bool{}
-	if q, err := c.Billing(jwt, mid); err == nil {
-		for _, id := range q.PlanIDs {
-			owned[id] = true
-		}
-	}
-	var claimed, problems, skipped []string
 	for _, p := range pw.Data.Plans {
-		if p.PlanID == "" {
+		pid := strings.TrimSpace(p.PlanID)
+		if pid == "" {
 			continue
 		}
-		if owned[strings.ToLower(p.PlanID)] {
-			if p.Name == "" {
-				p.Name = p.PlanID
+		key := strings.ToLower(pid)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = len(offers)
+		offers = append(offers, claimOffer{id: pid, name: p.Name})
+	}
+	return offers, seen
+}
+
+func (c *Client) mergeTouchOffers(ctx context.Context, jwt, mid string, offers *[]claimOffer, seen map[string]int, problems *[]string) {
+	status, raw, err := c.getJSON(ctx, http.MethodGet, config.OriginBaseURL+"/api/v1/marketing/touch?seq=0", jwt, mid, nil, nil)
+	if err != nil {
+		*problems = append(*problems, "touch: "+err.Error())
+		return
+	}
+	if status != 200 {
+		*problems = append(*problems, fmt.Sprintf("touch HTTP %d: %s", status, BodySnip(raw, 120)))
+		return
+	}
+	claims, err := touchPlanClaims(raw)
+	if err != nil {
+		*problems = append(*problems, "touch: "+err.Error())
+		return
+	}
+	for _, cl := range claims {
+		key := strings.ToLower(cl.PlanID)
+		if i, ok := seen[key]; ok {
+			if (*offers)[i].campaign == "" {
+				(*offers)[i].campaign = cl.CampaignID
 			}
-			skipped = append(skipped, p.Name)
 			continue
 		}
-		if err := c.claimPlan(ctx, base, jwt, mid, p.PlanID); err != nil {
-			problems = append(problems, err.Error())
-			continue
-		}
-		if p.Name == "" {
-			p.Name = p.PlanID
-		}
-		claimed = append(claimed, p.Name)
+		seen[key] = len(*offers)
+		*offers = append(*offers, claimOffer{id: cl.PlanID, campaign: cl.CampaignID})
 	}
-	if len(claimed) == 0 && len(problems) == 0 && len(skipped) > 0 {
-		return "", "already have: " + strings.Join(skipped, ", ")
+}
+
+// touchClaim is one banner button that carries action.args.plan_id.
+type touchClaim struct {
+	PlanID     string
+	CampaignID string
+}
+
+// touchPlanClaims reads plan ids from banner buttons only. background and
+// success_popup are not decoded, so a copy of the plan sitting there is
+// never claimed. seq=0 is the caller's cursor, not an offer id.
+func touchPlanClaims(raw []byte) ([]touchClaim, error) {
+	var wrap struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Deliveries []struct {
+				CampaignID string `json:"campaign_id"`
+				Banner     struct {
+					Buttons []struct {
+						Action struct {
+							Args struct {
+								PlanID string `json:"plan_id"`
+							} `json:"args"`
+						} `json:"action"`
+					} `json:"buttons"`
+				} `json:"banner"`
+			} `json:"deliveries"`
+		} `json:"data"`
 	}
-	return strings.Join(claimed, ", "), strings.Join(problems, "; ")
+	if err := json.Unmarshal(raw, &wrap); err != nil {
+		return nil, err
+	}
+	if wrap.Code != 0 {
+		return nil, fmt.Errorf("code %d %s", wrap.Code, wrap.Msg)
+	}
+	var out []touchClaim
+	seen := map[string]bool{}
+	for _, d := range wrap.Data.Deliveries {
+		cid := strings.TrimSpace(d.CampaignID)
+		for _, b := range d.Banner.Buttons {
+			pid := strings.TrimSpace(b.Action.Args.PlanID)
+			key := strings.ToLower(pid)
+			if pid == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, touchClaim{PlanID: pid, CampaignID: cid})
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) confirmTouch(ctx context.Context, jwt, mid, campaignID string) error {
+	body, _ := json.Marshal(map[string]string{
+		"campaign_id": campaignID,
+		"action_type": "confirm",
+	})
+	st, raw, err := c.getJSON(ctx, http.MethodPost, config.OriginBaseURL+"/api/v1/marketing/touch/action", jwt, mid, body, nil)
+	if err != nil {
+		return fmt.Errorf("touch confirm %s: %w", campaignID, err)
+	}
+	if st != 200 {
+		return fmt.Errorf("touch confirm %s HTTP %d: %s", campaignID, st, BodySnip(raw, 120))
+	}
+	var cw struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	_ = json.Unmarshal(raw, &cw)
+	if cw.Code != 0 {
+		return fmt.Errorf("touch confirm %s code %d %s", campaignID, cw.Code, cw.Msg)
+	}
+	return nil
 }
 
 // claimPlan: captcha → billing/claim; on 3007
@@ -222,9 +358,8 @@ func (c *Client) getJSON(ctx context.Context, method, url, jwt, mid string, body
 }
 
 // WarmAccount runs the warming sequence for one account (pool admission):
-// authless activation events → preview → claim of
-// every offered plan. No standalone balance call — the dashboard quota
-// refresh picks the granted state up afterwards.
+// activation events → preview + marketing/touch → claim. The dashboard
+// quota refresh picks the granted state up afterwards.
 func (c *Client) WarmAccount(ctx context.Context, jwt, mid string) WarmReport {
 	return c.WarmAccountOpts(ctx, jwt, mid, true)
 }
