@@ -264,6 +264,7 @@ func encodeBody(obj *orderedDoc) []byte {
 // glm-*) MUST resolve here before the catalog lookup, or the origin rejects
 // the request as an unknown model.
 var modelNameMap = map[string]string{
+	"glm-5.4":                 "GLM-5.4",
 	"glm-5.3":                 "GLM-5.3",
 	"glm-5.3-flash":           "GLM-5.3-Flash",
 	"glm-5.2":                 "GLM-5.2",
@@ -271,13 +272,11 @@ var modelNameMap = map[string]string{
 	"glm-turbo":               "GLM-5-Turbo",
 	"glm-5.1":                 "GLM-5.1",
 	"glm-4.7":                 "GLM-4.7",
-	"zcode glm 5.3":           "GLM-5.3",
-	"zcode glm 5.3 flash":     "GLM-5.3-Flash",
-	"claude-fable-5-1":        "GLM-5.3",
-	"fable":                   "GLM-5.3",
-	"claude-opus-4-8":         "GLM-5.3",
-	"claude-opus-5-5":         "GLM-5.3",
-	"opus":                    "GLM-5.3",
+	"claude-fable-5-1":        "GLM-5.4",
+	"fable":                   "GLM-5.4",
+	"claude-opus-4-8":         "GLM-5.4",
+	"claude-opus-5-5":         "GLM-5.4",
+	"opus":                    "GLM-5.4",
 	"claude-sonnet-4-6":       "GLM-5.3-Flash",
 	"claude-sonnet-5-5":       "GLM-5.3-Flash",
 	"sonnet":                  "GLM-5.3-Flash",

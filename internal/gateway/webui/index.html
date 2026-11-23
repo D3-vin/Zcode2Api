@@ -356,7 +356,7 @@ async function openEdit(id) {
   sel.value = egressOf(a);
   if (!sel.value) sel.value = 'pool';
   const dm = new Set((a.disabled_models || '').split(',').filter(Boolean));
-  const models = new Set(['glm-5.3', 'glm-5.3-flash']);
+  const models = new Set(['glm-5.4', 'glm-5.3', 'glm-5.3-flash']);
   for (const e of (a.entitlements || [])) if (e.name) models.add(String(e.name).toLowerCase());
   document.getElementById('edit-disabled').innerHTML = [...models].map(m =>
     `<label><input type="checkbox" value="${m}" ${dm.has(m) ? 'checked' : ''}> ${m}</label>`).join('');

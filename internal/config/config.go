@@ -23,7 +23,7 @@ var (
 	// activation events) identifies as the current desktop, 3.11.2; the
 	// platform gates plan offers by client version (empirically proven split).
 	BillingClientVersion = "4.0.0"
-	DefaultModelID       = "GLM-5.3"
+	DefaultModelID       = "GLM-5.4"
 	// 23mac.har (ZCode 3.16.3 Darwin x64) — billing + chat identity.
 	ClientPlatform   = "darwin-x64"
 	ClientOSCategory = "macos"
