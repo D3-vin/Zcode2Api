@@ -10,7 +10,7 @@ import (
 
 // AppVersion — single source for the startup banner and the dashboard.
 // Override at build: go build -ldflags "-X zcode2api/internal/config.AppVersion=1.0.1"
-var AppVersion = "1.0.7"
+var AppVersion = "1.0.9"
 
 // Deployment constants (hardwired; not env-driven). OriginBaseURL and
 // ClientVersion are vars only so tests can point them at a mock upstream.
@@ -22,7 +22,7 @@ var (
 	// BillingClientVersion — the billing family (balance/preview/claim +
 	// activation events) identifies as the current desktop, 3.11.2; the
 	// platform gates plan offers by client version (empirically proven split).
-	BillingClientVersion = "3.18.2"
+	BillingClientVersion = "4.0.0"
 	DefaultModelID       = "GLM-5.3"
 	// 23mac.har (ZCode 3.16.3 Darwin x64) — billing + chat identity.
 	ClientPlatform   = "darwin-x64"
