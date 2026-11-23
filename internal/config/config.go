@@ -10,7 +10,7 @@ import (
 
 // AppVersion — single source for the startup banner and the dashboard.
 // Override at build: go build -ldflags "-X zcode2api/internal/config.AppVersion=1.0.1"
-var AppVersion = "1.0.9"
+var AppVersion = "1.1.0"
 
 // Deployment constants (hardwired; not env-driven). OriginBaseURL and
 // ClientVersion are vars only so tests can point them at a mock upstream.
