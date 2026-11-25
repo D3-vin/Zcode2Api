@@ -132,11 +132,52 @@ func (s *Server) apiAccountsAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		JWT   string `json:"jwt"`
-		Label string `json:"label"`
+		JWT      string `json:"jwt"`
+		Label    string `json:"label"`
+		Accounts []struct {
+			JWT   string `json:"jwt"`
+			Label string `json:"label"`
+		} `json:"accounts"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.JWT) == "" {
-		http.Error(w, `{"error":"jwt required"}`, http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || (strings.TrimSpace(body.JWT) == "" && len(body.Accounts) == 0) {
+		http.Error(w, `{"error":"jwt or accounts required"}`, http.StatusBadRequest)
+		return
+	}
+	// API form: {"accounts":[{"jwt","label"}]} — per-item results, billing
+	// scans in the background. Each jwt may also be email:pass:token.
+	if len(body.Accounts) > 0 {
+		type itemRes struct {
+			Index int    `json:"index"`
+			OK    bool   `json:"ok"`
+			ID    int64  `json:"id,omitempty"`
+			Error string `json:"error,omitempty"`
+		}
+		var jobs []scanJob
+		results := make([]itemRes, 0, len(body.Accounts))
+		added, skipped := 0, 0
+		for i, it := range body.Accounts {
+			c, ok := parseCredentialLine(it.JWT)
+			if !ok {
+				results = append(results, itemRes{Index: i, Error: "empty or invalid jwt"})
+				skipped++
+				continue
+			}
+			label := c.label
+			if label == "" {
+				label = it.Label
+			}
+			a, err := s.store.Add(c.jwt, label)
+			if err != nil {
+				results = append(results, itemRes{Index: i, Error: err.Error()})
+				skipped++
+				continue
+			}
+			results = append(results, itemRes{Index: i, OK: true, ID: a.ID})
+			added++
+			jobs = append(jobs, scanJob{id: a.ID, jwt: a.JWT, mid: a.DeviceMid})
+		}
+		go s.scanQuotas(jobs)
+		writeJSON(w, map[string]any{"ok": true, "added": added, "skipped": skipped, "results": results})
 		return
 	}
 	// One line per account: a raw JWT, or email:pass:token (email → label).
