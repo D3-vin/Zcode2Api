@@ -58,6 +58,34 @@ func (s *Server) routeAnthropic(w http.ResponseWriter, r *http.Request, body []b
 	// to REQUEST_HOLD (0 = legacy fail-fast). While everything is benched a
 	// re-walk costs nothing — pickExcept refuses without origin traffic.
 	holdUntil := time.Now().Add(s.cfg.RequestHold)
+	deliver := func(acc *store.Account, resp *http.Response, head []byte) {
+		_ = s.store.Select(acc.ID)
+		s.quota1005Reset(acc.ID, model)
+		s.mu.Lock()
+		s.chatOK[acc.ID] = time.Now()
+		s.mu.Unlock()
+		if acc.RiskStrikes > 0 || acc.CoolingUntil > 0 {
+			s.store.RiskReset(acc.ID) // a clean answer clears the strikes
+		}
+		log.Printf("<< %d %s %s", resp.StatusCode, resp.Header.Get("Content-Type"), upstream.BodySnip(head, 120))
+
+		reqStart := time.Now()
+		scn := &usageScanner{}
+		// tee the body so usage (input/output/cache tokens) is accounted
+		// while the response streams to the client unchanged; the wrapped
+		// body starts with head, so the writers stream from it alone
+		resp.Body = &teeReadCloser{
+			Reader: io.TeeReader(io.MultiReader(bytes.NewReader(head), resp.Body), scn),
+			Closer: resp.Body,
+		}
+		if openai {
+			s.writeOpenAIFromOrigin(w, resp, head, resp.Body, model, ParseStream(body))
+		} else {
+			copyOrigin(w, resp, head)
+		}
+		LogOK(model, maskJWT(acc.JWT), resp.StatusCode, ParseStream(body), 0, time.Since(reqStart), scn.Usage())
+	}
+	var lastEmpty *emptyReply
 	dumped := false
 walk:
 	for {
@@ -177,31 +205,31 @@ walk:
 				skip[acc.ID] = true
 				continue
 			}
-			_ = s.store.Select(acc.ID)
-			s.quota1005Reset(acc.ID, model)
-			s.mu.Lock()
-			s.chatOK[acc.ID] = time.Now()
-			s.mu.Unlock()
-			if acc.RiskStrikes > 0 || acc.CoolingUntil > 0 {
-				s.store.RiskReset(acc.ID) // a clean answer clears the strikes
+			// a non-stream 200 whose reply carries no text and no tool call (GLM
+			// sometimes ends with a lone thinking block) is a dud — fail over to
+			// another account; clients like OmniRoute turn it into a 502
+			if resp.StatusCode == http.StatusOK && !ParseStream(body) {
+				full, rerr := io.ReadAll(io.LimitReader(io.MultiReader(bytes.NewReader(head), resp.Body), 8<<20))
+				resp.Body.Close()
+				if rerr != nil {
+					log.Printf("<< read %v", rerr)
+					skip[acc.ID] = true
+					continue
+				}
+				resp.Body = io.NopCloser(bytes.NewReader(full[len(head):]))
+				if replyIsEmpty(full) {
+					log.Printf("<< 200 empty reply (no text/tool_use) %s — switching account", maskJWT(acc.JWT))
+					skip[acc.ID] = true
+					lastEmpty = &emptyReply{acc: acc, resp: resp, head: head}
+					continue
+				}
 			}
-			log.Printf("<< %d %s %s", resp.StatusCode, resp.Header.Get("Content-Type"), upstream.BodySnip(head, 120))
-
-			reqStart := time.Now()
-			scn := &usageScanner{}
-			// tee the body so usage (input/output/cache tokens) is accounted
-			// while the response streams to the client unchanged; the wrapped
-			// body starts with head, so the writers stream from it alone
-			resp.Body = &teeReadCloser{
-				Reader: io.TeeReader(io.MultiReader(bytes.NewReader(head), resp.Body), scn),
-				Closer: resp.Body,
-			}
-			if openai {
-				s.writeOpenAIFromOrigin(w, resp, head, resp.Body, model, ParseStream(body))
-			} else {
-				copyOrigin(w, resp, head)
-			}
-			LogOK(model, maskJWT(acc.JWT), resp.StatusCode, ParseStream(body), 0, time.Since(reqStart), scn.Usage())
+			deliver(acc, resp, head)
+			return
+		}
+		if lastEmpty != nil {
+			// every account answered empty — relay the last one honestly
+			deliver(lastEmpty.acc, lastEmpty.resp, lastEmpty.head)
 			return
 		}
 		if s.cfg.RequestHold <= 0 || time.Now().After(holdUntil) {
@@ -580,4 +608,49 @@ func (fw *flushWriter) Write(p []byte) (int, error) {
 type teeReadCloser struct {
 	io.Reader
 	io.Closer
+}
+
+type emptyReply struct {
+	acc  *store.Account
+	resp *http.Response
+	head []byte
+}
+
+// replyIsEmpty reports a complete upstream answer (JSON message or SSE) that
+// has neither non-empty text nor a tool_use block. Unparseable → not empty.
+func replyIsEmpty(full []byte) bool {
+	if upstream.IsSSE(full) {
+		sawAny, hasOut := false, false
+		_ = scanAnthropicSSE(bytes.NewReader(full), func(ev string, data map[string]any) {
+			sawAny = true
+			switch ev {
+			case "content_block_start":
+				cb, _ := data["content_block"].(map[string]any)
+				if upstream.Str(cb["type"]) == "tool_use" {
+					hasOut = true
+				}
+			case "content_block_delta":
+				d, _ := data["delta"].(map[string]any)
+				if upstream.Str(d["type"]) == "text_delta" && upstream.Str(d["text"]) != "" {
+					hasOut = true
+				}
+			}
+		})
+		return sawAny && !hasOut
+	}
+	var doc struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(full, &doc) != nil || doc.Content == nil {
+		return false
+	}
+	for _, b := range doc.Content {
+		if b.Type == "tool_use" || (b.Type == "text" && b.Text != "") {
+			return false
+		}
+	}
+	return true
 }

@@ -275,6 +275,11 @@ func (s *Server) apiAccountsImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "import": res, "accounts": s.accountsJSON()})
 }
 
+const (
+	claimMaxWorkers = 4                      // concurrent accounts in claim-all
+	claimPause      = 400 * time.Millisecond // per-worker pause between accounts
+)
+
 // apiAccountsClaimAll is the dashboard "Claim all": preview → claim every
 // offered plan for every account (no activation events — warm owns those).
 func (s *Server) apiAccountsClaimAll(w http.ResponseWriter, r *http.Request) {
@@ -301,8 +306,11 @@ func (s *Server) apiAccountsClaimAll(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.CaptchaOff && s.cfg.CaptchaMinters > 0 && n > s.cfg.CaptchaMinters {
 		n = s.cfg.CaptchaMinters
 	}
-	if n > 32 {
-		n = 32
+	// claim hits the origin through the egress proxies several times per
+	// account: a wide fan-out over a few hundred accounts starves the tail
+	// ("egress failed after 3 lines") — keep it narrow and paced
+	if n > claimMaxWorkers {
+		n = claimMaxWorkers
 	}
 	work := accs[:0]
 	for _, a := range accs {
@@ -322,6 +330,7 @@ func (s *Server) apiAccountsClaimAll(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 		claimed, problems := s.up.ClaimOfferedPlans(ctx, a.JWT, a.DeviceMid)
 		cancel()
+		time.Sleep(claimPause)
 		logClaim("all", a.ID, a.JWT, claimed, problems)
 		ok := claimed != "" || strings.HasPrefix(problems, "already have:")
 		detail := claimed
