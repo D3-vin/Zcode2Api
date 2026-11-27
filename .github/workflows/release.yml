@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            ext: .exe
+          - goos: linux
+            goarch: amd64
+            ext: ''
+          - goos: darwin
+            goarch: amd64
+            ext: ''
+          - goos: darwin
+            goarch: arm64
+            ext: ''
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath -ldflags="-s -w" \
+            -o zcode2api-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} \
+            ./cmd/zcode2api
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zcode2api-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: zcode2api-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          if-no-files-found: error
+
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec mv {} release/ \;
+          cp .env.example release/env.example
+          ls -lh release/
+      
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      
+      - name: Generate release notes
+        id: changelog
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          if [ -z "$PREV_TAG" ]; then
+            echo "NOTES=Initial release" >> $GITHUB_OUTPUT
+          else
+            # Generate changelog from commits between tags
+            CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s" --no-merges)
+            echo "NOTES<<EOF" >> $GITHUB_OUTPUT
+            echo "$CHANGELOG" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Zcode2API v${{ steps.version.outputs.VERSION }}
+          body: |
+            # Zcode2API v${{ steps.version.outputs.VERSION }}
+            
+            ## Changes
+            
+            ${{ steps.changelog.outputs.NOTES }}
+            
+            ## Downloads
+            
+            | Platform | File |
+            |----------|------|
+            | Windows x64 | `zcode2api-windows-amd64.exe` |
+            | Linux x64 | `zcode2api-linux-amd64` |
+            | macOS Intel | `zcode2api-macos-amd64` |
+            | macOS Apple Silicon | `zcode2api-macos-arm64` |
+            | Config template | `env.example` |
+            
+            ## Quick Start
+            
+            ```bash
+            # Download binary + env.example
+            # Rename and configure
+            mv env.example .env  # or: ren env.example .env (Windows)
+            
+            # Run
+            ./zcode2api-*
+            ```
+            
+            Dashboard: http://localhost:3101
+          files: release/*
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
