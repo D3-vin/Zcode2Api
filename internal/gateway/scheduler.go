@@ -12,6 +12,8 @@ import (
 	"log"
 	"strconv"
 	"time"
+
+	"zcode2api/internal/upstream"
 )
 
 // startSchedulers launches the background loops (idempotent, guarded).
@@ -44,7 +46,9 @@ func (s *Server) warmDueAccounts() {
 	}
 	today := time.Now().Format("2006-01-02")
 	for _, a := range accs {
-		if a.Status != "" { // expired/revoked/hidden — skip
+		// expired accounts are warmed too: the grant appears only after the
+		// activation events + claim, so skipping them would strand them forever
+		if a.Status != "" && a.Status != "expired" { // revoked/disabled — skip
 			continue
 		}
 		// per-account date stored in settings: warm_last_<id>
@@ -58,6 +62,16 @@ func (s *Server) warmDueAccounts() {
 		rep := s.up.WarmAccountOpts(ctx, a.JWT, a.DeviceMid, claim)
 		cancel()
 		s.store.SetSetting("warm_last_"+strconv.FormatInt(a.ID, 10), today)
+		if a.Status == "expired" {
+			// the grant may have arrived: a real snapshot revives the account
+			if q, err := s.up.Billing(a.JWT, a.DeviceMid); err == nil && !upstream.IsEmptyGrant(q) {
+				s.mu.Lock()
+				_ = s.store.UpdateQuota(a.ID, q)
+				s.catalog.MergeFromQuota(q)
+				s.mu.Unlock()
+				log.Printf("[warm-daily] %s revived from expired: %s", maskJWT(a.JWT), q.PlanName)
+			}
+		}
 		log.Printf("[warm-daily] %s %s", maskJWT(a.JWT), rep.Plans)
 	}
 }

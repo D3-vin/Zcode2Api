@@ -162,7 +162,27 @@ Model: GLM-5.3
 | GET | `/v1/models` | Available models (synced from account billing) |
 | GET | `/v1/usage` | Usage statistics |
 | GET | `/api/health` | Server health check |
+| POST | `/api/accounts/add` | Add accounts (see below) |
+| POST | `/api/accounts/restore` | Restore a full backup: `{"accounts":[{jwt,label,device_mid,quota_json,plan_name,expires_at,api_key}]}` or `{"text":"email:pass:token\n..."}` |
+| GET | `/api/accounts/export` | Export all accounts (backup format for `restore`) |
 | GET | `/` | Dashboard (login-gated at `/login.html`) |
+
+**Adding accounts via API** (`AUTH_TOKEN` required):
+
+```bash
+# one account (jwt may also be email:pass:token; several lines = bulk)
+curl -X POST http://localhost:3101/api/accounts/add \
+  -H "Authorization: Bearer $AUTH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"jwt":"<JWT>","label":"me@example.com"}'
+
+# many accounts, per-item results
+curl -X POST http://localhost:3101/api/accounts/add \
+  -H "Authorization: Bearer $AUTH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"accounts":[{"jwt":"<JWT1>","label":"a"},{"jwt":"user@x.com:pass:<JWT2>"}]}'
+# -> {"ok":true,"added":2,"skipped":0,"results":[{"index":0,"ok":true,"id":12},...]}
+```
+
+New accounts get a fresh device id; quotas are fetched in the background.
 
 **Authorization:**
 - Header: `Authorization: Bearer <token>` or `x-api-key: <token>`

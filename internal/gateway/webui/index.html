@@ -154,6 +154,7 @@ function stats() {
     const st = displayStatus(a);
     if (st === 'active' || st === 'standby' || st === 'cooling') healthy++;
     if (st === 'exhausted') exhausted++;
+    if (a.status === 'expired' || a.status === 'revoked') continue; // stale snapshot
     for (const e of (a.entitlements || [])) rem += (e.remaining || 0);
   }
   document.getElementById('s-total').textContent = total;
@@ -198,8 +199,10 @@ function renderRows() {
   el.innerHTML = `<div class="acct-head"><span class="th-sort" title="Oldest first / newest first" onclick="toggleAcctSort()">Credential / account<svg class="sort-chevron${acctSortDir < 0 ? ' desc' : ''}" viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></svg></span><span>Status</span><span title="3 strikes (final 3012) → 30m cooldown; a clean 200 resets">Strikes</span><span>Quota</span><span class="th-actions">Actions</span></div>` +
     shown.map(a => {
       const st = displayStatus(a);
-      const ent = (a.entitlements || []);
-      const quota = ent.length ? '<div class="quota-rows">' + ent.map(e => {
+      // expired/revoked: the stored entitlements are a stale pre-expiry snapshot
+      const stale = a.status === 'expired' || a.status === 'revoked';
+      const ent = stale ? [] : (a.entitlements || []);
+      const quota = stale ? '<div class="quota-empty">Grant ' + a.status + ' (last snapshot hidden)</div>' : ent.length ?'<div class="quota-rows">' + ent.map(e => {
         const pct = e.limit ? Math.round((e.remaining || 0) / e.limit * 100) : 0;
         const cls = pct <= 0 ? 'zero' : (pct < 15 ? 'low' : '');
         return `<div class="quota-row"><div class="quota-row-name">${e.name}</div>
