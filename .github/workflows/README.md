@@ -2,68 +2,68 @@
 
 ## Release Workflow
 
-Автоматическая сборка и публикация релизов при создании тега.
+Automated build and release publishing when creating a tag.
 
-### Триггер
+### Trigger
 
-Запускается при push тега с префиксом `v*` (например: `v1.1.2`, `v2.0.0`)
+Runs on push of tags with `v*` prefix (e.g., `v1.1.2`, `v2.0.0`)
 
-### Процесс
+### Process
 
-1. **Build** — собирает бинарники для 4 платформ параллельно:
+1. **Build** — compiles binaries for 4 platforms in parallel:
    - Windows AMD64 (.exe)
    - Linux AMD64
    - macOS Intel (AMD64)
    - macOS Apple Silicon (ARM64)
 
-2. **Release** — создаёт GitHub Release с:
-   - Автогенерированным changelog из коммитов между тегами
-   - Всеми бинарниками
-   - `env.example` как config template
-   - Готовым описанием с таблицей Downloads
+2. **Release** — creates GitHub Release with:
+   - Auto-generated changelog from commits between tags
+   - All binaries
+   - `env.example` as config template
+   - Ready-to-use description with Downloads table
 
-### Использование
+### Usage
 
 ```bash
-# 1. Создать тег
+# 1. Create tag
 git tag -a v1.1.2 -m "Zcode2API v1.1.2 - Description"
 
-# 2. Запушить тег
+# 2. Push tag
 git push origin v1.1.2
 
-# 3. Дождаться завершения workflow (3-5 минут)
-# Релиз появится автоматически: https://github.com/D3-vin/Zcode2Api/releases
+# 3. Wait for workflow completion (3-5 minutes)
+# Release will appear automatically: https://github.com/D3-vin/Zcode2Api/releases
 ```
 
-### Мониторинг
+### Monitoring
 
 - **Actions tab**: https://github.com/D3-vin/Zcode2Api/actions
-- **Email notifications**: GitHub отправит письмо при фейле
+- **Email notifications**: GitHub will send email on failure
 
 ### Troubleshooting
 
 **Build failed:**
-- Проверить логи в Actions tab
-- Убедиться что код компилируется локально: `go build ./cmd/zcode2api`
+- Check logs in Actions tab
+- Ensure code compiles locally: `go build ./cmd/zcode2api`
 
 **Release not created:**
-- Проверить что тег начинается с `v`
-- Убедиться что `GITHUB_TOKEN` имеет права `contents: write` (настроено в workflow)
+- Verify tag starts with `v`
+- Ensure `GITHUB_TOKEN` has `contents: write` permissions (configured in workflow)
 
 **Missing artifacts:**
-- Workflow автоматически фейлится если бинарники не собрались
-- Проверить логи Build job
+- Workflow automatically fails if binaries don't build
+- Check Build job logs
 
-### Настройки
+### Configuration
 
-Все параметры в `.github/workflows/release.yml`:
-- **Go version**: `1.25` (меняется в `uses: actions/setup-go@v5`)
-- **Build flags**: `-trimpath -ldflags="-s -w"` (минимальный размер)
-- **CGO**: отключён (`CGO_ENABLED=0`) для статических бинарников
+All parameters in `.github/workflows/release.yml`:
+- **Go version**: `1.25` (change in `uses: actions/setup-go@v5`)
+- **Build flags**: `-trimpath -ldflags="-s -w"` (minimal size)
+- **CGO**: disabled (`CGO_ENABLED=0`) for static binaries
 
-### Ручная сборка
+### Manual Build
 
-Если нужно собрать вручную:
+If you need to build manually:
 
 ```bash
 # Windows
