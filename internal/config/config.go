@@ -18,7 +18,7 @@ var (
 	AccountsDBPath = "data/accounts.db"
 	KeysFilePath   = env("ZCODE_KEYS", "tokens.txt")
 	OriginBaseURL  = "https://zcode.z.ai"
-	ClientVersion  = "3.16.3" // messages fingerprint (verified 200)
+	ClientVersion  = "4.0.0"
 	// BillingClientVersion — the billing family (balance/preview/claim +
 	// activation events) identifies as the current desktop, 3.11.2; the
 	// platform gates plan offers by client version (empirically proven split).
