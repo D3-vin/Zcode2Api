@@ -316,11 +316,6 @@ func (s *Server) apiAccountsImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "import": res, "accounts": s.accountsJSON()})
 }
 
-const (
-	claimMaxWorkers = 4                      // concurrent accounts in claim-all
-	claimPause      = 400 * time.Millisecond // per-worker pause between accounts
-)
-
 // apiAccountsClaimAll is the dashboard "Claim all": preview → claim every
 // offered plan for every account (no activation events — warm owns those).
 func (s *Server) apiAccountsClaimAll(w http.ResponseWriter, r *http.Request) {
@@ -340,18 +335,17 @@ func (s *Server) apiAccountsClaimAll(w http.ResponseWriter, r *http.Request) {
 	if body.Newest {
 		reverseAccounts(accs)
 	}
-	n := s.cfg.BillingWorkers
+	n := s.cfg.ClaimWorkers
 	if n < 1 {
-		n = 1
-	}
-	if !s.cfg.CaptchaOff && s.cfg.CaptchaMinters > 0 && n > s.cfg.CaptchaMinters {
-		n = s.cfg.CaptchaMinters
-	}
-	// claim hits the origin through the egress proxies several times per
-	// account: a wide fan-out over a few hundred accounts starves the tail
-	// ("egress failed after 3 lines") — keep it narrow and paced
-	if n > claimMaxWorkers {
-		n = claimMaxWorkers
+		// ponytail: unset CLAIM_WORKERS keeps the old chain (billing workers,
+		// then captcha minters). A set value is used as-is.
+		n = s.cfg.BillingWorkers
+		if n < 1 {
+			n = 1
+		}
+		if !s.cfg.CaptchaOff && s.cfg.CaptchaMinters > 0 && n > s.cfg.CaptchaMinters {
+			n = s.cfg.CaptchaMinters
+		}
 	}
 	work := accs[:0]
 	for _, a := range accs {
@@ -371,7 +365,9 @@ func (s *Server) apiAccountsClaimAll(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 		claimed, problems := s.up.ClaimOfferedPlans(ctx, a.JWT, a.DeviceMid)
 		cancel()
-		time.Sleep(claimPause)
+		if s.cfg.ClaimPause > 0 {
+			time.Sleep(s.cfg.ClaimPause)
+		}
 		logClaim("all", a.ID, a.JWT, claimed, problems)
 		ok := claimed != "" || strings.HasPrefix(problems, "already have:")
 		detail := claimed
