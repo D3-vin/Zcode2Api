@@ -7,7 +7,6 @@ package upstream
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"io"
 	"log"
@@ -35,7 +34,6 @@ func chatTransport(proxyURL *url.URL) *http.Transport {
 		ResponseHeaderTimeout: 120 * time.Second,
 		MaxIdleConnsPerHost:   8,
 		IdleConnTimeout:       90 * time.Second,
-		DisableCompression:    true, // 23mac.har chat sends no Accept-Encoding
 	}
 	if proxyURL != nil {
 		t.Proxy = http.ProxyURL(proxyURL)
@@ -66,7 +64,6 @@ func sendChat(ctx context.Context, proxyURL, target *url.URL, headers [][2]strin
 		return nil, err
 	}
 	req.ContentLength = int64(len(body))
-	req.Close = true
 	for _, kv := range headers {
 		req.Header.Set(kv[0], kv[1])
 	}
@@ -74,18 +71,6 @@ func sendChat(ctx context.Context, proxyURL, target *url.URL, headers [][2]strin
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
-	}
-	// We set accept-encoding ourselves, so net/http will
-	// NOT transparently decode — do it here or every consumer (verdict
-	// classifier, SSE relay, OpenAI converter) sees gzip bytes.
-	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
-		if gr, err := gzip.NewReader(resp.Body); err == nil {
-			resp.Header.Del("Content-Encoding")
-			resp.Body = struct {
-				io.Reader
-				io.Closer
-			}{gr, resp.Body}
-		}
 	}
 	log.Printf("[tls] net/http h1 via %s", egressLabel(proxyURL))
 	return resp, nil

@@ -55,6 +55,5 @@ func chatRequestHeaders(jwt, appVer, deviceMid, queryID, traceID string, extra h
 	add("x-zcode-query-source", "main_turn")
 	add("x-zcode-session-type", "main")
 	add("x-zcode-trace-id", traceID)
-	add("Connection", "close")
 	return h
 }
